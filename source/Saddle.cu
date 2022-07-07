@@ -97,26 +97,24 @@ void Saddle_Multiply(
 	// Set output to zero to start (size 17N)
 	Saddle_ZeroOutput_kernel<<<grid,threads>>>( d_b, group_size );
 	
-	//// Do the mobility multiplication. Afterwards, d_b[0:11N] = M*F (the generalized velocity).
-	//Mobility_GeneralizedMobility( 	
-	//    				d_b, //output
-	//    				d_x, //input to this function, but actually it's the unknown in FSD
-	//				d_pos,
-	//    				d_group_members,
-	//    				group_size,
-	//    				box,
-	//				ker_data,
-	//				mob_data,
-	//				work_data
-	//				);
-	// Turn off far-field interactions, i.e. d_b[0:11N] = d_x[0:11N]
-	Saddle_AddFloat_kernel<<<grid,threads>>>( d_b, d_x, d_b, 0.0, 1.0, group_size, 11 );
+	// Do the mobility multiplication. Afterwards, d_b[0:11N] = M*F (the generalized velocity).
+	Mobility_GeneralizedMobility( 	
+	    				d_b, //output
+	    				d_x, //input to this function, but actually it's the unknown in FSD
+					d_pos,
+	    				d_group_members,
+	    				group_size,
+	    				box,
+					ker_data,
+					mob_data,
+					work_data
+					);
+	//// Turn off far-field interactions, i.e. d_b[0:11N] = d_x[0:11N]
+	//Saddle_AddFloat_kernel<<<grid,threads>>>( d_b, d_x, d_b, 0.0, 1.0, group_size, 11 );
 	
 	// M*F + B*U, i.e. d_b[0:6N] += U (= d_x[11N:17N])
 	Saddle_AddFloat_kernel<<<grid,threads>>>( d_b, &d_x[11*group_size], d_b, 1.0, 1.0, group_size, 6 );
-	// -M*F + B*U, i.e. d_b[0:6N] = -d_b[0:6N] + d_x[11N:17N] (zhoge)
-	//Saddle_AddFloat_kernel<<<grid,threads>>>( d_b, &d_x[11*group_size], d_b, -1.0, 1.0, group_size, 6 );
-
+	
 	// Do the resistance multiplication. Afterwards, d_b[11N:17N] = R_FU^nf*U (the minus sign is accounted for later).
 	Lubrication_RFU_kernel<<<grid,threads>>>(
 							&d_b[11*group_size], // output
