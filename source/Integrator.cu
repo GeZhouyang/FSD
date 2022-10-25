@@ -633,7 +633,7 @@ void Integrator_ComputeVelocity(
 	// Add the ambient rate of strain to the right-hand side
 	//Integrator_AddStrainRate_kernel<<< grid, threads >>>( d_rhs, shear_rate, group_size );
 	Integrator_AddStrainRate_kernel<<< grid, threads >>>( d_rhs,
-							      -shear_rate,    //correction by madhu
+							      shear_rate,    //zhoge: now consistent sign
 							      group_size ); 
 
 	// Compute the near-field stochastic force
@@ -703,7 +703,7 @@ void Integrator_ComputeVelocity(
 							&d_solution[6*group_size], // stresslet is entries (6*N+1):(11*N)
 							&d_Velocity[6*group_size], // Add to self
 							1.0,
-							-1.0,                      // zhoge: Because shear rate was minus
+							1.0,                      // zhoge: now consistent
 							group_size, 5 );
 	
 	// Add the near-field contributions to the stresslet

@@ -176,14 +176,14 @@ __global__ void Mobility_WaveSpace_Spread_kernel(
 	  pos_shared[0].x = tpos.x; 
 	  pos_shared[0].y = tpos.y; 
 	  pos_shared[0].z = tpos.z;
-	  pos_shared[0].w = 2.0;
+	  pos_shared[0].w = 2.0; //zhoge: used later?
 		
 	  Scalar4 tforce = d_net_force[idx];
 	  force_shared[0].x = tforce.x;
 	  force_shared[0].y = tforce.y;
 	  force_shared[0].z = tforce.z;
 
-	  couplet_shared[0] = make_scalar4( d_couplet[2*idx].x, d_couplet[2*idx].y, d_couplet[2*idx].z, d_couplet[2*idx].w );
+	  couplet_shared[0] = make_scalar4( d_couplet[2*idx  ].x, d_couplet[2*idx  ].y, d_couplet[2*idx  ].z, d_couplet[2*idx  ].w );
 	  couplet_shared[1] = make_scalar4( d_couplet[2*idx+1].x, d_couplet[2*idx+1].y, d_couplet[2*idx+1].z, d_couplet[2*idx+1].w );
 	}
 	__syncthreads();
@@ -291,6 +291,9 @@ __global__ void Mobility_WaveSpace_Spread_kernel(
 	to get the Fourier components of the gridded velocity and velocity gradient. (Same Size
 	Particles). 
 
+	zhoge: Mainly Lindbo & Tornberg (2010).
+	       Note that there is a sign flip for MUC and MDF.
+
 	Gridded quantities are resacled and mapped in place. 
 
 	gridX		(input/output) 	x-component of Fourier components of gridded force/velocity
@@ -355,7 +358,7 @@ __global__ void Mobility_WaveSpace_Green_kernel(
 		// Geometric Quantities
 		//
 
-		// k.F 
+		// k.F (actually k.F/|k|^2)
 		Scalar2 kdF = (tid==0) ? make_scalar2(0.0,0.0) : make_scalar2( ( tk.x*fX.x + tk.y*fY.x + tk.z*fZ.x ) / ksq,  ( tk.x*fX.y + tk.y*fY.y + tk.z*fZ.y ) / ksq );
 
 		// C.k
@@ -363,7 +366,7 @@ __global__ void Mobility_WaveSpace_Green_kernel(
 		Scalar2 Cdky = make_scalar2( (cYX.x*tk.x + cYY.x*tk.y + cYZ.x*tk.z), (cYX.y*tk.x + cYY.y*tk.y + cYZ.y*tk.z) );
 		Scalar2 Cdkz = make_scalar2( (cZX.x*tk.x + cZY.x*tk.y + cZZ.x*tk.z), (cZX.y*tk.x + cZY.y*tk.y + cZZ.y*tk.z) );
 
-		// k.C.k
+		// k.C.k (actually k.C.k/|k|^2)
 		Scalar2 kdcdk = (tid==0) ? make_scalar2(0.0,0.0) : make_scalar2( (Cdkx.x*tk.x + Cdky.x*tk.y + Cdkz.x*tk.z) / ksq, (Cdkx.y*tk.x + Cdky.y*tk.y + Cdkz.y*tk.z) / ksq );
 
 		// Fk
@@ -400,10 +403,10 @@ __global__ void Mobility_WaveSpace_Green_kernel(
 		// UF Part
 		//
 
-		// Scaling factor
+		// Scaling factor (tk.w set in Mobility_SetGridk_kernel)
 		Scalar B = (tid==0) ? 0.0 : tk.w * ( sinf( k ) / k ) * ( sinf( k ) / k );
 	
-		// Velocity calculation
+		// Velocity calculation, (I-kk)*F
 		gridX[tid] = make_scalar2( ( fX.x - tk.x * kdF.x ) * B, ( fX.y - tk.x * kdF.y ) * B );
 		gridY[tid] = make_scalar2( ( fY.x - tk.y * kdF.x ) * B, ( fY.y - tk.y * kdF.y ) * B );
 		gridZ[tid] = make_scalar2( ( fZ.x - tk.z * kdF.x ) * B, ( fZ.y - tk.z * kdF.y ) * B );
@@ -412,8 +415,11 @@ __global__ void Mobility_WaveSpace_Green_kernel(
 		// UC Part
 		//
 
-		// Scaling factor (imaginary here!)
-		B = (tid==0) ? 0.0 : tk.w * ( sinf( k ) / k ) * ( 3.0 * ( sinf(k) - k*cosf(k) ) / (ksq*k) );
+		//zhoge: It's a bit confusing when k is a unit vector, when it is not. But the result is correct.
+
+		// Scaling factor (imaginary here!)  (zhoge: times -1 so the sign convention of M^ff is consistent with what's written in the FSD paper)
+		//B = (tid==0) ? 0.0 : tk.w * ( sinf( k ) / k ) * ( 3.0 * ( sinf(k) - k*cosf(k) ) / (ksq*k) );
+		B = (tid==0) ? 0.0 : -tk.w * ( sinf( k ) / k ) * ( 3.0 * ( sinf(k) - k*cosf(k) ) / (ksq*k) );
 	
 		// Velocity calculation
 		gridX[tid].x += -( Cdkx.y - tk.x*kdcdk.y ) * B;
@@ -429,8 +435,9 @@ __global__ void Mobility_WaveSpace_Green_kernel(
 		// DF Part
 		//
 
-		// Scaling factor
-		B = (tid==0) ? 0.0 : tk.w * (-1.0) * ( sinf( k ) / k ) * ( 3.0 * ( sinf(k) - k*cosf(k) ) / (ksq*k) );
+		// Scaling factor (zhoge: times -1 so the sign convention of M^ff is consistent with what's written in the FSD paper)
+		//B = (tid==0) ? 0.0 : tk.w * (-1.0) * ( sinf( k ) / k ) * ( 3.0 * ( sinf(k) - k*cosf(k) ) / (ksq*k) );
+		B = (tid==0) ? 0.0 : tk.w * ( sinf( k ) / k ) * ( 3.0 * ( sinf(k) - k*cosf(k) ) / (ksq*k) );  
 		
 		// Velocity gradient contribution
 		gridXX[tid] = make_scalar2( -( Fkxx.y - kkxx*kdF.y) * B, ( Fkxx.x - kkxx*kdF.x) * B );
@@ -837,6 +844,19 @@ __global__ void Mobility_WaveSpace_ContractD(
 	Wrap all the functions to compute wave space part of Mobility ( Same Size Particles ) and 
 	drive the kernel functions. 
 
+	zhoge: The wave-save sum employs the fast summation method of Lindbo & Tornberg (2010), see FSD Appendix B.1.
+	       It consists of five steps:
+
+	       (1) Obtain the forces and couplets on uniform grids from dispersed particles (convolutions w/ Gaussian kernels).
+	       (2) FFT the forces/couplets.
+	       (3) Apply the scaling in the wave-sapce (e.g. Hasimoto's).
+	       (4) Inverse FFT the above.
+	       (5) Obtain the velocities and strain rates on particles from grids (again convolutions w/ Gaussian kernels)
+
+	       Cost of the direct Ewald summation is O(N^2).
+	       Cost of the above algorithm is O(N). 
+	       (Prefactors are of course different, but eventually the fast method should win if N is big enough.)
+
 	d_pos			(input)  positions of the particles
 	d_vel			(output) particle velocity
 	d_delu			(output) particle velocity gradient
@@ -919,9 +939,9 @@ void gpu_stokes_Mwave_wrap(
 	Scalar expfac = 2.0 * xisq / eta;
 	
 	// Reset the grid ( remove any previously distributed forces )
-	Mobility_ZeroGrid_kernel<<<gridNBlock,gridBlockSize>>>( d_gridX, NxNyNz );
-	Mobility_ZeroGrid_kernel<<<gridNBlock,gridBlockSize>>>( d_gridY, NxNyNz );
-	Mobility_ZeroGrid_kernel<<<gridNBlock,gridBlockSize>>>( d_gridZ, NxNyNz );
+	Mobility_ZeroGrid_kernel<<<gridNBlock,gridBlockSize>>>( d_gridX,  NxNyNz );
+	Mobility_ZeroGrid_kernel<<<gridNBlock,gridBlockSize>>>( d_gridY,  NxNyNz );
+	Mobility_ZeroGrid_kernel<<<gridNBlock,gridBlockSize>>>( d_gridZ,  NxNyNz );
 	Mobility_ZeroGrid_kernel<<<gridNBlock,gridBlockSize>>>( d_gridXX, NxNyNz );
 	Mobility_ZeroGrid_kernel<<<gridNBlock,gridBlockSize>>>( d_gridXY, NxNyNz );
 	Mobility_ZeroGrid_kernel<<<gridNBlock,gridBlockSize>>>( d_gridXZ, NxNyNz );
@@ -931,24 +951,24 @@ void gpu_stokes_Mwave_wrap(
 	Mobility_ZeroGrid_kernel<<<gridNBlock,gridBlockSize>>>( d_gridZX, NxNyNz );
 	Mobility_ZeroGrid_kernel<<<gridNBlock,gridBlockSize>>>( d_gridZY, NxNyNz );
 	
-	// Spread forces onto grid (zhoge: check this out later, force spreading)
+	// Spread forces onto grid
 	Mobility_WaveSpace_Spread_kernel<<<Cgrid, Cthreads>>>(
 							      d_pos,
-							      d_net_force,
-							      d_couplet,
-							      d_gridX, d_gridY, d_gridZ,
-							      d_gridXX, d_gridXY, d_gridXZ,
-							      d_gridYX, d_gridYY, d_gridYZ,
-							      d_gridZX, d_gridZY,
+							      d_net_force,                  //input 
+							      d_couplet,		    //input
+							      d_gridX, d_gridY, d_gridZ,    //output
+							      d_gridXX, d_gridXY, d_gridXZ, //output
+							      d_gridYX, d_gridYY, d_gridYZ, //output
+							      d_gridZX, d_gridZY,	    //output
 							      group_size,
 							      Nx, Ny, Nz,
 							      d_group_members,
 							      box, P, gridh, xi, eta, prefac, expfac );
 	
 	// Perform FFT on gridded forces
-	cufftExecC2C(plan, d_gridX, d_gridX, CUFFT_FORWARD);
-	cufftExecC2C(plan, d_gridY, d_gridY, CUFFT_FORWARD);
-	cufftExecC2C(plan, d_gridZ, d_gridZ, CUFFT_FORWARD);
+	cufftExecC2C(plan, d_gridX,  d_gridX,  CUFFT_FORWARD);
+	cufftExecC2C(plan, d_gridY,  d_gridY,  CUFFT_FORWARD);
+	cufftExecC2C(plan, d_gridZ,  d_gridZ,  CUFFT_FORWARD);
 	cufftExecC2C(plan, d_gridXX, d_gridXX, CUFFT_FORWARD);
 	cufftExecC2C(plan, d_gridXY, d_gridXY, CUFFT_FORWARD);
 	cufftExecC2C(plan, d_gridXZ, d_gridXZ, CUFFT_FORWARD);
@@ -958,8 +978,13 @@ void gpu_stokes_Mwave_wrap(
 	cufftExecC2C(plan, d_gridZX, d_gridZX, CUFFT_FORWARD);
 	cufftExecC2C(plan, d_gridZY, d_gridZY, CUFFT_FORWARD);
 	
-	// Apply wave space scaling to FFT'd forces
-	Mobility_WaveSpace_Green_kernel<<<gridNBlock,gridBlockSize>>>( d_gridX, d_gridY, d_gridZ, d_gridXX, d_gridXY, d_gridXZ, d_gridYX, d_gridYY, d_gridYZ, d_gridZX, d_gridZY, d_gridk, NxNyNz );
+	// Apply wave space scaling to FFT'd forces (mapping Fourier space force moments to Fourier space velocity moments)
+	Mobility_WaveSpace_Green_kernel<<<gridNBlock,gridBlockSize>>>(
+								      d_gridX,  d_gridY,  d_gridZ,  //input/output
+								      d_gridXX, d_gridXY, d_gridXZ, //input/output
+								      d_gridYX, d_gridYY, d_gridYZ, //input/output
+								      d_gridZX, d_gridZY,	    //input/output
+								      d_gridk, NxNyNz );
 	
 	// Return rescaled forces to real space
 	cufftExecC2C(plan, d_gridX, d_gridX, CUFFT_INVERSE);
@@ -975,8 +1000,19 @@ void gpu_stokes_Mwave_wrap(
 	cufftExecC2C(plan, d_gridZY, d_gridZY, CUFFT_INVERSE);
 	
 	// Evaluate contribution of grid velocities at particle centers
-	Mobility_WaveSpace_ContractU<<<Cgrid, Cthreads, (B*B*B+1)*sizeof(float3)>>>( d_pos, d_vel, d_gridX, d_gridY, d_gridZ, group_size, Nx, Ny, Nz, xi, eta, d_group_members, box, P, gridh, quadW*prefac, expfac );
-	Mobility_WaveSpace_ContractD<<<Cgrid, Cthreads, (2*B*B*B+1)*sizeof(float4)>>>( d_pos, d_delu, d_gridXX, d_gridXY, d_gridXZ, d_gridYX, d_gridYY, d_gridYZ, d_gridZX, d_gridZY, group_size, Nx, Ny, Nz, xi, eta, d_group_members, box, P, gridh, quadW*prefac, expfac );
+	Mobility_WaveSpace_ContractU<<<Cgrid, Cthreads, (B*B*B+1)*sizeof(float3)>>>(d_pos,
+										    d_vel,  //output
+										    d_gridX, d_gridY, d_gridZ,
+										    group_size, Nx, Ny, Nz, xi, eta,
+										    d_group_members, box, P, gridh, quadW*prefac, expfac );
+	
+	Mobility_WaveSpace_ContractD<<<Cgrid, Cthreads, (2*B*B*B+1)*sizeof(float4)>>>(d_pos,
+										      d_delu,  //output
+										      d_gridXX, d_gridXY, d_gridXZ,
+										      d_gridYX, d_gridYY, d_gridYZ,
+										      d_gridZX, d_gridZY,
+										      group_size, Nx, Ny, Nz, xi, eta,
+										      d_group_members, box, P, gridh, quadW*prefac, expfac );
  
 }
 
@@ -1101,6 +1137,12 @@ __global__ void Mobility_RealSpace_kernel(
                                 Scalar g1 = tewaldC1m.z + ( tewaldC1p.z - tewaldC1m.z ) * fac;
                                 Scalar g2 = tewaldC1m.w + ( tewaldC1p.w - tewaldC1m.w ) * fac;
 
+				//zhoge: times -1 so the sign convention of M^ff is consistent with what's written in the FSD paper
+				g1 = g1*(-1.);
+				g2 = g2*(-1.);
+
+
+				
                                 Scalar h1 = tewaldC2m.x + ( tewaldC2p.x - tewaldC2m.x ) * fac;
                                 Scalar h2 = tewaldC2m.y + ( tewaldC2p.y - tewaldC2m.y ) * fac;
                                 Scalar h3 = tewaldC2m.z + ( tewaldC2p.z - tewaldC2m.z ) * fac;
@@ -1301,16 +1343,21 @@ void Mobility_MobilityUD(
 	Scalar4 *d_couplet = (work_data->mob_couplet);
 	Scalar4 *d_delu = (work_data->mob_delu);
 
-	// Map Torque/Stresslet to Couplet
-        Mobility_TS2C_kernel<<<grid, threads>>>(d_couplet, d_TorqueStress, group_size);
+	// Map Torque/Stresslet to Couplet (zhoge: The couplet C_ij is a traceless 3x3 matrix)
+	// (C_ij + C_ji)/2 = Stresslet (S_ij) 
+	// (C_ij - C_ji)/2 = eps_ijk * T_k (where T_k is the torque) 
+        Mobility_TS2C_kernel<<<grid, threads>>>(
+						d_couplet,      //output
+						d_TorqueStress,
+						group_size);
 	
 	// Compute the wave space contribution to the velocity
 	gpu_stokes_Mwave_wrap( 
 				d_pos,
-				d_vel1,
-				d_delu1,
-				d_net_force,
-				d_couplet,
+				d_vel1,       //output
+				d_delu1,      //output
+				d_net_force,  //input
+				d_couplet,    //input
 				d_group_members,
 				group_size,
 				box,
@@ -1365,11 +1412,20 @@ void Mobility_MobilityUD(
 							);
 	
 	// Add real and wave space parts together
-	Mobility_LinearCombination_kernel<<<grid, threads>>>(d_vel1, d_vel2, d_vel, 1.0, 1.0, group_size, d_group_members);
-	Mobility_Add4_kernel<<<grid, threads>>>(d_delu1, d_delu2, d_delu, 1.0, 1.0, group_size);
+	Mobility_LinearCombination_kernel<<<grid, threads>>>(d_vel1, d_vel2,
+							     d_vel,          //output
+							     1.0, 1.0,
+							     group_size, d_group_members);      
+	Mobility_Add4_kernel<<<grid, threads>>>(
+						d_delu1, d_delu2,
+						d_delu,          //output
+						1.0, 1.0,
+						group_size);
 
 	// Map velocity gradient back to angular velocity and rate of strain
-        Mobility_D2WE_kernel<<<grid, threads>>>(d_delu, d_AngvelStrain, group_size);
+        Mobility_D2WE_kernel<<<grid, threads>>>(d_delu,
+						d_AngvelStrain,  //output
+						group_size);
 
 	// Free memory
 	d_vel1 = NULL;
@@ -1428,35 +1484,30 @@ void Mobility_GeneralizedMobility(
 	Scalar4 *d_TorqueStress = (work_data->mob_TorqueStress);
 
 	// Convert generalized force to force/torque/stresslet
-	Saddle_SplitGeneralizedF_kernel<<<grid,threads>>>(
-						 	d_generalF, 
-							d_net_force,
-							d_TorqueStress,
-							group_size
-							);
+	Saddle_SplitGeneralizedF_kernel<<<grid,threads>>>(d_generalF,      //input
+							  d_net_force,     //output
+							  d_TorqueStress,  //output
+							  group_size);
 
-	// Call the Mobility wrapper
-	Mobility_MobilityUD(	
-				d_pos,
-                        	d_vel,
-				d_AngvelStrain,
-                        	d_net_force,
-				d_TorqueStress,
-				d_group_members,
-				group_size,
-                        	box,
-				ker_data,
-				mob_data,
-				work_data
-				);
+	// Call the Mobility wrapper (wrap all func's to compute U=M*F)
+	Mobility_MobilityUD(d_pos,
+			    d_vel,           //output
+			    d_AngvelStrain,  //output
+			    d_net_force,     //input
+			    d_TorqueStress,  //input
+			    d_group_members,
+			    group_size,
+			    box,
+			    ker_data,
+			    mob_data,
+			    work_data);
 
 	// Convert velocity/angular velocity/rate of strain to generalized velocity
 	Saddle_MakeGeneralizedU_kernel<<<grid,threads>>>(
-							d_generalU, 
-							d_vel,
-							d_AngvelStrain,
-							group_size
-							);
+							 d_generalU,      //output
+							 d_vel,           //input
+							 d_AngvelStrain,  //input
+							 group_size);
 	
 	// Clean up
 	d_vel = NULL;
