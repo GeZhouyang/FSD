@@ -4,9 +4,9 @@ Original authors: Andrew M. Fiore, James W. Swan (MIT)
 
 >  Note: The original FSD code contains a few minor errors in the lubrication and mobility calculations.
 >  Also, there was a bug causing memory leaks in the preconditioner.
->  This version fixes these issues and tries to improve the overall implementation in performance and clarity.
+>  This version fixes these issues and tries to improve the overall performance and clarity.
 
-A brief summary of the main files for the plugin is given below. Deterministic hydrodynamics:
+A brief summary of the main files is given below. Deterministic hydrodynamics:
 
 >	- Stokes.cc			        : C++ module to set up the method and run the integrator
 >	- Stokes.cu			        : Driver function for integration
@@ -24,16 +24,16 @@ Brownian motion:
 
 >	- Brownian_FarField.cu 		: Methods to compute the far-field Brownian displacements
 >	- Brownian_NearField.cu		: Methods to compute the near-field Brownian forces
->	- Helper_Brownian.cu		: Helper functions used in Brownian_FarField.cu and Brownian_NearField.cu
 
 Auxiliary functions:
 
->	- Helper_Debug.cu		    : Functions for debugging and code checking, printing output, etc.
+>	- Helper_Stokes.cu		    : Helper functions for two-step Stokes integrator	
 >	- Helper_Integrator.cu		: Helper functions to simplify code in Integrator.cu
+>	- Helper_Saddle.cu		    : Helper functions for saddle point matrix calculations
 >	- Helper_Mobility.cu		: Helper functions for mobility calculations in Mobility.cu
 >	- Helper_Precondition.cu	: Helper functions for preconditioning calcualtions
->	- Helper_Saddle.cu		    : Helper functions for saddle point matrix calculations
->	- Helper_Stokes.cu		    : Helper functions for two-step Stokes integrator	
+>	- Helper_Brownian.cu		: Helper functions used in Brownian_FarField.cu and Brownian_NearField.cu
+>	- Helper_Debug.cu		    : Functions for debugging and code checking, printing output, etc.
 
 Brief summary of file dependency (not listed, but all files depend on their helpers, e.g. Mobility.cu depends on Helper_Mobility.cu)
 
