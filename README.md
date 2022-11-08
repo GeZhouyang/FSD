@@ -2,11 +2,9 @@
 
 Original authors: Andrew M. Fiore, James W. Swan (MIT)
 
->  Note: This version fixes several bugs in the original FSD code published by the above authors (see ref below).
->  Mainly the *memory leak* (in `Precondition_IChol`), the *lubrication* calculations, 
->  and the *far-field mobility* (inconsistent sign convention with respect to the paper, to be updated).
->  Other modifications include the RK2 integrator (instead of 1st order Euler), stress post-processings, etc.
->  /*Zhouyang Ge*
+>  Note: The original FSD code contains a few minor errors in the lubrication and mobility calculations.
+>  Also, there was a bug causing memory leaks.
+>  This version fixes these issues and includes other improvement in the integrator and post-processing.
 
 Description of files within the c++/CUDA module for the Fast Stokesian Dynamics (FSD) plugin for HOOMD, called PSEv3. 
 The method is based on the Positively-Split Ewald (PSE) approach for sampling the Brownian displacements of the far-field multipole expansion, 
