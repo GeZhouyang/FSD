@@ -108,7 +108,9 @@ void Integrator_RFD(
 			WorkData *work_data
 			);
 
-void Integrator_ComputeVelocity(
+void Integrator_ComputeVelocity(     unsigned int timestep,
+				     unsigned int output_period,
+			
 					float *d_AppliedForce,
 					float *d_Velocity,
 					float dt,

@@ -79,6 +79,7 @@ ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 //! Kernel driver for the first part (no second part) of the Stokes update called by Stokes.cc
 cudaError_t Stokes_StepOne(     unsigned int timestep,
+				unsigned int output_period,
 				Scalar4 *d_pos,
 				Scalar4 *d_net_force,
 				Scalar4 *d_vel,

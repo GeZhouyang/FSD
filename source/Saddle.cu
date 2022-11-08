@@ -51,7 +51,7 @@
 
 /*
 	Define the saddle point matrix describing Stokesian Dynamics,
-	i.e. it describes the relationship Ax=b.
+	i.e. it describes the relationship Ax=b (rather than constructing the matrix A).
 */
 
 
@@ -97,44 +97,56 @@ void Saddle_Multiply(
 	// Set output to zero to start (size 17N)
 	Saddle_ZeroOutput_kernel<<<grid,threads>>>( d_b, group_size );
 	
-	// Do the mobility multiplication. Afterwards, d_b[0:11N] = M*F (the generalized velocity).
-	Mobility_GeneralizedMobility( 	
-	    				d_b, //output
-	    				d_x, //input to this function, but actually it's the unknown in FSD
-					d_pos,
-	    				d_group_members,
-	    				group_size,
-	    				box,
-					ker_data,
-					mob_data,
-					work_data
-					);
-	//// Turn off far-field interactions, i.e. d_b[0:11N] = d_x[0:11N]
-	//Saddle_AddFloat_kernel<<<grid,threads>>>( d_b, d_x, d_b, 0.0, 1.0, group_size, 11 );
+	// Do the mobility multiplication, M^ff * F => d_b[0:11N]
+	Mobility_GeneralizedMobility(
+	    			     d_b, //output (temporary, modified next)
+	    			     d_x, //input (generalized forces)
+				     d_pos,
+	    			     d_group_members,
+	    			     group_size,
+	    			     box,
+				     ker_data,
+				     mob_data,
+				     work_data);
+	//// zhoge: Copy the first 11N entries from d_x to d_b to effectively turn off far-field mobility
+	//// (need to comment the Mobility_GeneralizedMobility above)
+	//cudaMemcpy( d_b, d_x, 11*group_size*sizeof(float), cudaMemcpyDeviceToDevice );
+
 	
-	// M*F + B*U, i.e. d_b[0:6N] += U (= d_x[11N:17N])
-	Saddle_AddFloat_kernel<<<grid,threads>>>( d_b, &d_x[11*group_size], d_b, 1.0, 1.0, group_size, 6 );
+	// M^ff*F + B*U => RHS[0:11N]. Effectively, d_b[0:6N] += d_x[11N:17N]
+	Saddle_AddFloat_kernel<<<grid,threads>>>(d_b,
+						 &d_x[11*group_size],
+						 d_b,                 //output
+						 1.0, 1.0,
+						 group_size, 6 );
+
+
+
 	
-	// Do the resistance multiplication. Afterwards, d_b[11N:17N] = R_FU^nf*U (the minus sign is accounted for later).
+	// Do the resistance multiplication, R_FU^nf * U => d_b[11N:17N] 
 	Lubrication_RFU_kernel<<<grid,threads>>>(
-							&d_b[11*group_size], // output
-							&d_x[11*group_size], // input
-							d_pos,
-							d_group_members,
-							group_size, 
-			      				box,
-							res_data->nneigh, 
-							res_data->nlist, 
-							res_data->headlist, 
-							res_data->table_dist,
-							res_data->table_vals,
-							res_data->table_min,
-							res_data->table_dr,
-							res_data->rlub
-							);
+						 &d_b[11*group_size], // output (temporary, modified next)
+						 &d_x[11*group_size], // input (relative velocity)
+						 d_pos,
+						 d_group_members,
+						 group_size, 
+						 box,
+						 res_data->nneigh, 
+						 res_data->nlist, 
+						 res_data->headlist, 
+						 res_data->table_dist,
+						 res_data->table_vals,
+						 res_data->table_min,
+						 res_data->table_dr,
+						 res_data->rlub);
 	
-	// B^T * F - RFU * U, i.e. d_b[11N:17N] = F[0:6N] - d_b[11N:17N]
-	Saddle_AddFloat_kernel<<<grid,threads>>>( d_x, &d_b[11*group_size], &d_b[11*group_size], 1.0, -1.0, group_size, 6 );
+	// B^T*F - R_FU*U => RHS[11N:17N]. Effectively, d_b[11N:17N] = d_x[0:6N] - d_b[11N:17N]
+	Saddle_AddFloat_kernel<<<grid,threads>>>(
+						 d_x,
+						 &d_b[11*group_size],
+						 &d_b[11*group_size],  //output
+						 1.0, -1.0,
+						 group_size, 6 );
 	
 }
 
@@ -172,18 +184,16 @@ void Saddle_Preconditioner(
 	// Get pointer to scratch array (size 17N)
 	float *d_Scratch = res_data->Scratch2;	
 
-	//
 	// In the preconditioner, M is approximated as identity
-	// zhoge: Simply copy the first 11N entries from d_b (the previous RHS vector) to d_Scratch.
+	// Effectively, d_Scratch[0:11N] = M^(-1) * d_b[0:11N]
 	cudaMemcpy( d_Scratch, d_b, 11*group_size*sizeof(float), cudaMemcpyDeviceToDevice );
-	//cudaMemcpy( d_Scratch, d_b, 17*group_size*sizeof(float), cudaMemcpyDeviceToDevice );//night
 	
 	//
-	// Incomplete Cholesky solves (done in place!)
+	// Incomplete Cholesky solves (done in place!) 
 	//
-
-	// RFU^(-1) * B^T * [ U; E ]
-	// zhoge: Theoretically no effect (B^T truncates up to 6N, all zeros), practically may have residuals.
+	// zhoge: output = -S^(-1) * input, where S = -(RFU + I).
+	
+	// d_Scratch[11N:] = -S^(-1) * B^T * M^(-1) * d_b[0:11N], where M^(-1) is approximated as identity
 	Precondition_Saddle_RFUmultiply(	
 					&d_Scratch[11*group_size], // output
 					d_Scratch,                 // input
@@ -207,11 +217,11 @@ void Saddle_Preconditioner(
 					ker_data->particle_grid,
 					ker_data->particle_threads
 					);
-	
+
+	// Effectively, d_Scratch[0:11N] += M^(-1) * B * S^(-1) * B^T * M^(-1) * d_b[0:11N], where M^(-1) is approximated as identity
 	Saddle_AddFloat_kernel<<<grid,threads>>>( d_Scratch, &d_Scratch[11*group_size], d_Scratch, 1.0, -1.0, group_size, 6 );
 	
-	// RFU^(-1) * Fnf
-	// actually -RFU^-1 * Fnf
+	// d_b[0:6N] = -S^(-1) * d_b[11N:]
 	Precondition_Saddle_RFUmultiply(	
 					d_b,                 // output (overwrites, but doesn't matter)
 					&d_b[11*group_size], // input
@@ -235,11 +245,18 @@ void Saddle_Preconditioner(
 					ker_data->particle_grid,
 					ker_data->particle_threads
 					);
-	
+
+	// Effectively, d_Scratch[0:11N] += - M^(-1) * B * S^(-1) * d_b[11N:], where M^(-1) is approximated as identity
 	Saddle_AddFloat_kernel<<<grid,threads>>>( d_b, d_Scratch, d_Scratch, 1.0,  1.0, group_size, 6 );
+
+	// d_Scratch[11N:] += S^(-1) * d_b[11N:]
 	Saddle_AddFloat_kernel<<<grid,threads>>>( &d_Scratch[11*group_size], d_b, &d_Scratch[11*group_size], 1.0, -1.0, group_size, 6);
-	
+
+	// Finish, d_x <-- d_Scratch
 	cudaMemcpy( d_x, d_Scratch, 17*group_size*sizeof(float), cudaMemcpyDeviceToDevice );
+
+	//// zhoge: uncomment below to effectively turn off the preconditioner (can comment everything above, too)
+	//cudaMemcpy( d_x, d_b, 17*group_size*sizeof(float), cudaMemcpyDeviceToDevice );
 	
 	// Clean up
 	d_Scratch = NULL;

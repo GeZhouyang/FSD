@@ -772,9 +772,9 @@ void Stokes::OutputData( unsigned int timestep, BoxDim box, Scalar current_shear
     float stress_xx = nden * stlt[0];
     float stress_xy = nden * stlt[1];
     float stress_xz = nden * stlt[2];
-    float stress_yy = nden * stlt[3];
-    float stress_yz = nden * stlt[4];
-    float stress_zz = nden * (- stlt[0] - stlt[3]);  //By definition, stlt is traceless.    
+    float stress_yz = nden * stlt[3];  //zhoge: should be yz
+    float stress_yy = nden * stlt[4];
+    float stress_zz = -stress_xx-stress_yy;  //By definition, stlt is traceless.    
     
     // Output the hydrodynamic stresslets	
     fprintf (file0, "%7i %12.3e %12.3e %12.3e %12.3e %12.3e %12.3e \n", tag,
@@ -1417,6 +1417,7 @@ void Stokes::integrateStepOne(unsigned int timestep)
 	// ********************************************************************
 
 	Stokes_StepOne( timestep,
+			m_period,
 		        d_pos.data,            //input/output
 			d_net_force.data,      
 			d_vel.data,            //output: HOOMD velocity vector (Scalar4)
@@ -1425,7 +1426,7 @@ void Stokes::integrateStepOne(unsigned int timestep)
                         m_deltaT,              
 			m_error,	       
 			current_shear_rate,    
-                        16,//256,                   //cuda block size
+                        16,                   //cuda block size (16 is faster)
 			d_image.data,	       
                         d_index_array.data,    
                         group_size,	       

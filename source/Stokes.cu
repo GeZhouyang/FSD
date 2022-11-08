@@ -95,6 +95,7 @@ scalar4_tex_t tables1_tex;
 	Explicit Euler integration of particle positions given a velocity.
 
 	timestep        (input)         current timestep
+	output_period   (input)         output per output_period steps
 	d_pos		(input/ouput)	array of particle positions
 	d_net_force	(input)		particle forces
 	d_vel		(output)	particle velocities
@@ -115,6 +116,7 @@ scalar4_tex_t tables1_tex;
 */
 
 cudaError_t Stokes_StepOne(     unsigned int timestep,
+				unsigned int output_period,
 				Scalar4 *d_pos,
 				Scalar4 *d_net_force,
 				Scalar4 *d_vel,
@@ -239,7 +241,7 @@ cudaError_t Stokes_StepOne(     unsigned int timestep,
 	// first RK step
 	
 	// Compute particle velocities from central RFD + Saddle point solve (in Integrator.cu)
-	Integrator_ComputeVelocity(
+	Integrator_ComputeVelocity(timestep, output_period,
 				   d_AppliedForce,  
 				   d_Velocity,      //output (FSD velocity and stresslet, 11N)
 				   dt,		 
@@ -268,7 +270,7 @@ cudaError_t Stokes_StepOne(     unsigned int timestep,
 								);
 	
 	// second RK step
-
+	// zhoge: Probably no need to precondition again
 	Precondition_Wrap(pos_rk1,           
 			  d_group_members, 
 			  group_size,	   
@@ -295,7 +297,7 @@ cudaError_t Stokes_StepOne(     unsigned int timestep,
 							  );
 
 	// Compute particle velocities from central RFD + Saddle point solve (in Integrator.cu)
-	Integrator_ComputeVelocity(
+	Integrator_ComputeVelocity(timestep, output_period,
 				   d_AppliedForce,  
 				   d_Velocity,      //output (FSD velocity and stresslet, 11N)
 				   dt/2.,		 

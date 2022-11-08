@@ -547,6 +547,8 @@ void Integrator_RFD(
 /*! 
 	Combine all the parts required to compute the particle displacements
 
+	timestep                (input)  current timestep
+	output_period           (input)  output per output_period steps
 	d_AppliedForce		(input)  6Nx1 particle generalized forces
 	d_Velocity		(output) 11Nx1 particle generalized velocities (6N) and stresslets (5N)
 	dt			(input)  integration timestep
@@ -563,7 +565,9 @@ void Integrator_RFD(
 
 
 */
-void Integrator_ComputeVelocity(
+void Integrator_ComputeVelocity(     unsigned int timestep,
+				     unsigned int output_period,
+			
 					float *d_AppliedForce,
 					float *d_Velocity,
 					float dt,
@@ -633,7 +637,7 @@ void Integrator_ComputeVelocity(
 	// Add the ambient rate of strain to the right-hand side
 	//Integrator_AddStrainRate_kernel<<< grid, threads >>>( d_rhs, shear_rate, group_size );
 	Integrator_AddStrainRate_kernel<<< grid, threads >>>( d_rhs,
-							      shear_rate,    //zhoge: now consistent sign
+							      -shear_rate,    //correction by madhu
 							      group_size ); 
 
 	// Compute the near-field stochastic force
@@ -696,19 +700,23 @@ void Integrator_ComputeVelocity(
 							&d_solution[11*group_size],	// Velocity is entries (11*N+1):(17*N)
 							d_Velocity, 			// Add to self
 							1.0, 1.0, group_size, 6 );
+
 	
-	// Get stresslet out of solution vector (in Helper_Saddle.cu)
-	Saddle_AddFloat_kernel<<<grid,threads>>>( 
-							&d_Velocity[6*group_size], // stresslet is last 5*N entries
-							&d_solution[6*group_size], // stresslet is entries (6*N+1):(11*N)
-							&d_Velocity[6*group_size], // Add to self
-							1.0,
-							1.0,                      // zhoge: now consistent
-							group_size, 5 );
+	// zhoge: Only process stresslets if they are to be written to output files
+	if ( ( output_period > 0 ) && ( int(timestep) % output_period == output_period-1 ) ) //-1 because output in the next step
+	  {
+	    // Get the far-field stresslet out of solution vector
+	    Saddle_AddFloat_kernel<<<grid,threads>>>( 
+						     &d_Velocity[6*group_size], // stresslet is last 5*N entries
+						     &d_solution[6*group_size], // stresslet is entries (6*N+1):(11*N)
+						     &d_Velocity[6*group_size], // Add to self
+						     1.0,
+						     -1.0,                      // zhoge: Because shear rate was minus
+						     group_size, 5 );
 	
-	// Add the near-field contributions to the stresslet
-	// - RSU_nf * (U-Uinf)
-	Lubrication_RSU_kernel<<< grid, threads >>>(
+	    // Add the near-field contributions to the stresslet
+	    // - RSU_nf * (U-Uinf)
+	    Lubrication_RSU_kernel<<< grid, threads >>>(
 							&d_Velocity[6*group_size],  // output, stresslet is last 5*N entries
 							&d_solution[11*group_size], // input
 							d_pos,
@@ -724,11 +732,10 @@ void Integrator_ComputeVelocity(
 							res_data->table_dr,
 							res_data->rlub
 							);
-	// + RSE_nf : Einf
-	Lubrication_RSE_kernel<<< grid, threads >>>(
+	    // + RSE_nf : Einf
+	    Lubrication_RSE_kernel<<< grid, threads >>>(
 							&d_Velocity[6*group_size], // output, stresslet is last 5*N entries
 							shear_rate,
-							//-shear_rate, //correction by madhu
 							group_size, 
 							d_group_members,
 							res_data->nneigh, 
@@ -741,7 +748,7 @@ void Integrator_ComputeVelocity(
 							res_data->table_min,
 							res_data->table_dr
 							);
-
+	  }
 
 
 	// Clean up
