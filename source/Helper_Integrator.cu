@@ -106,32 +106,53 @@ __global__ void Integrator_ZeroVelocity_kernel(
 
 	d_b		(input/output) 	right-hand side vector
 	shear_rate 	(input) 	shear rate of applied deformation
+	B2              (input)         coefficient of B2 mode (spherical squirmers)
+	d_ori           (input)         particle orientation (unit vector)
    	N 		(input)  	number of particles
 
 */
 __global__ void Integrator_AddStrainRate_kernel( 
 						float *d_b,
 						float shear_rate,
+						unsigned int *d_group_members,
+						float B2,
+						float *d_sqm_B2_mask,
+						Scalar3 *d_ori,
 						unsigned int N
 						){
 
 	// Thread index
-	unsigned int tid = blockDim.x * blockIdx.x + threadIdx.x;
+	unsigned int tidx = blockDim.x * blockIdx.x + threadIdx.x;
 	
 	// Check if thread is inbounds
-	if ( tid < N ) {
+	if ( tidx < N ) {
 
+		// Particle ID
+		unsigned int tid = d_group_members[tidx];
 
 		// Index into array
-		int ind = 6*N + 5*tid;
+		unsigned int ind = 6*N + 5*tid;
+	        
+		// Add ambient strain rate Einf (E_xy = E_yx = shear_rate/2, all else 0)
+		d_b[ ind + 0 ] += 0.0;        // E_xx - E_zz
+		d_b[ ind + 1 ] += shear_rate; // E_xy * 2   
+		d_b[ ind + 2 ] += 0.0;	      // E_xz * 2   
+		d_b[ ind + 3 ] += 0.0;	      // E_yz * 2   
+		d_b[ ind + 4 ] += 0.0;	      // E_yy - E_zz
 
-		// Add strain rate. For each particle, stores
-		// [ F1, F2, F3, L1, L2, L3, E1, E2, E3, E4, E5 ]	
-		d_b[ ind + 0 ] += 0.0;
-		d_b[ ind + 1 ] += shear_rate; //zhoge: because it is 2E_xy, see "Computational tricks"
-		d_b[ ind + 2 ] += 0.0;
-		d_b[ ind + 3 ] += 0.0;
-		d_b[ ind + 4 ] += 0.0;
+		// Substract the particle strain rate from Einf
+		Scalar3 pdir = d_ori[tid];
+		Scalar px = pdir.x;
+		Scalar py = pdir.y;
+		Scalar pz = pdir.z;
+
+		Scalar b2 = -0.6*B2*d_sqm_B2_mask[tid];  //prefactor for the active strain rate (require radius a=1)
+		d_b[ ind + 0 ] -= b2*(px*px - pz*pz);   
+		d_b[ ind + 1 ] -= b2*(2.*px*py);	
+		d_b[ ind + 2 ] -= b2*(2.*px*pz);	
+		d_b[ ind + 3 ] -= b2*(2.*py*pz);	
+		d_b[ ind + 4 ] -= b2*(py*py - pz*pz);
+		
 
 	}
 }

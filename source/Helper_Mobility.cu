@@ -50,6 +50,7 @@ ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 // Maintainer: joaander
 // Modified by Gang Wang
 // Modified by Andrew Fiore
+// Modified by Zhouyang Ge
 
 
 #include "Helper_Mobility.cuh"
@@ -237,20 +238,24 @@ __global__ void Mobility_D2WE_kernel(
                 Scalar W[3];
                 Scalar E[5];
 
-                W[0] = 0.5 * ( D[0].w - D[1].w );
-                W[1] = 0.5 * ( D[1].z - D[0].z );
-                W[2] = 0.5 * ( D[0].y - D[1].y );
+                W[0] = 0.5 * ( D[0].w - D[1].w );  //Omega_x
+                W[1] = 0.5 * ( D[1].z - D[0].z );  //Omega_y
+                W[2] = 0.5 * ( D[0].y - D[1].y );  //Omega_z
 
-                E[0] = D[0].x;
-                E[1] = 0.5 * ( D[0].y + D[1].y );
-                E[2] = 0.5 * ( D[0].z + D[1].z );
-                E[3] = 0.5 * ( D[0].w + D[1].w );
-                E[4] = D[1].x;
+                E[0] = D[0].x;                     //E_xx
+                E[1] = 0.5 * ( D[0].y + D[1].y );  //E_xy
+                E[2] = 0.5 * ( D[0].z + D[1].z );  //E_xz
+                E[3] = 0.5 * ( D[0].w + D[1].w );  //E_yz
+                E[4] = D[1].x;			   //E_yy
 
 		// Write output
-                d_omegaE[2*idx]   = make_scalar4( W[0], W[1], W[2], 2*E[0]+E[4] );
-                d_omegaE[2*idx+1] = make_scalar4( 2*E[1], 2*E[2], 2*E[3], 2*E[4]+E[0] );
-                
+                d_omegaE[2*idx]   = make_scalar4( W[0], W[1], W[2],
+						  2*E[0]+E[4] );   //E_xx-E_zz
+                d_omegaE[2*idx+1] = make_scalar4( 2*E[1],	   //2*E_xy
+						  2*E[2],	   //2*E_xz
+						  2*E[3],	   //2*E_yz
+						  2*E[4]+E[0] );   //E_yy-E_zz
+		
         }
 }
 
@@ -280,17 +285,19 @@ __global__ void Mobility_TS2C_kernel(
 		// Torque is first 3 elements of the 2 scalar4s
 		// Stresslet is last 5 elements of the 2 scalar4s
                 Scalar4 TS[2];
-                TS[0] = make_scalar4( d_ts[2*idx].x,   d_ts[2*idx].y,   d_ts[2*idx].z,   d_ts[2*idx].w );
+                TS[0] = make_scalar4( d_ts[2*idx].x,   d_ts[2*idx].y,   d_ts[2*idx].z,   d_ts[2*idx].w   );
                 TS[1] = make_scalar4( d_ts[2*idx+1].x, d_ts[2*idx+1].y, d_ts[2*idx+1].z, d_ts[2*idx+1].w );
 
-                Scalar Lx = TS[0].x;
-                Scalar Ly = TS[0].y;
-                Scalar Lz = TS[0].z;
+		// zhoge: times -1 to effectively transpose C (because the sign of S is corrected)
+                Scalar Lx = -TS[0].x;  
+                Scalar Ly = -TS[0].y;  
+                Scalar Lz = -TS[0].z;
+		
 
                 Scalar Sxx = TS[0].w;
                 Scalar Sxy = TS[1].x;
                 Scalar Sxz = TS[1].y;
-                Scalar Syz = TS[1].z;
+                Scalar Syz = TS[1].z;  //zhoge: It is not Syy !!! (The html document is wrong)
                 Scalar Syy = TS[1].w;
 
 		// Compute the couplet from torque and stresslet

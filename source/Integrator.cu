@@ -1,7 +1,7 @@
 // This file is part of the PSEv3 plugin, released under the BSD 3-Clause License
 //
 // Andrew Fiore
-// Zhouyang Ge
+// Modified by Zhouyang Ge
 
 #include "Integrator.cuh"
 
@@ -104,6 +104,7 @@ extern "C" __global__ void Integrator_ExplicitEuler_kernel(
    
 	d_pos_in		(input)  3Nx1 particle positions at initial point
 	d_pos_out		(output) 3Nx1 new particle positions
+	d_ori                   (input/output) 4Nx1 particle orientations
 	d_Velocity		(input)  6Nx1 generalized particle velocities
 	d_image			(input)  particle periodic images
 	d_group_members		(input)  indices of the mebers of the group to integrate
@@ -118,8 +119,13 @@ extern "C" __global__ void Integrator_ExplicitEuler_kernel(
 */
 
 extern "C" __global__ void Integrator_ExplicitEuler_Shear_kernel(Scalar4 *d_pos_in,
+								 Scalar3 *d_ori_in,
 								 Scalar4 *d_pos_out,
+								 Scalar3 *d_ori_out,
 								 float *d_Velocity,
+								 float B1,
+								 float *d_sqm_B1_mask,
+								 Scalar3 *d_noise_ang,
 								 int3 *d_image,
 								 unsigned int *d_group_members,
 								 unsigned int group_size,
@@ -142,18 +148,48 @@ extern "C" __global__ void Integrator_ExplicitEuler_Shear_kernel(Scalar4 *d_pos_
 		Scalar3 pos = make_scalar3(pos4.x, pos4.y, pos4.z);
 		  
 		// read the particle's velocity and update position
-		float ux = d_Velocity[ 6*idx ];
+		float ux = d_Velocity[ 6*idx     ];
 		float uy = d_Velocity[ 6*idx + 1 ];
 		float uz = d_Velocity[ 6*idx + 2 ];
-		Scalar3 vel = make_scalar3( ux, uy, uz);
+		float wx = d_Velocity[ 6*idx + 3 ];
+		float wy = d_Velocity[ 6*idx + 4 ];
+		float wz = d_Velocity[ 6*idx + 5 ];
 
+		//////////////////////// uncomment if 2D (zhoge)
+		//uz = 0.;
+		//wx = 0.;
+		//wy = 0.;
+		
+		
+		Scalar3 vel = make_scalar3( ux, uy, uz);
+		Scalar3 omg = make_scalar3( wx, wy, wz);
+		
 	        // Add the shear
 	        vel.x += shear_rate * pos.y;
+		omg.z -= shear_rate/2.;
+
+		// Add noise
+		omg += d_noise_ang[idx];
+		
+		// Form the unit quaternion for rotation
+		Scalar  q0 = 1.0;                     //real part (default)
+		Scalar3 qv = make_scalar3(0.,0.,0.);  //imag part (default)
+		Scalar abs_omg = sqrtf(dot(omg,omg));
+		if (abs_omg > 1e-6) {                 //if rotate
+		  Scalar3 axi = omg/abs_omg;          //axis of rotation
+		  Scalar angm = abs_omg * dt;         //magnitude
+		  q0 = cos(angm/2.);                  //real part
+		  qv = axi * sin(angm/2.);            //imag part
+		}
+
+		// Minus the active slip
+		Scalar3 pv = d_ori_in[idx];
+		vel -= (-2./3.*B1*d_sqm_B1_mask[idx])*pv;
 
 		// Move the positions	
 		Scalar3 dx = vel * dt;
 		pos += dx;
-		
+
 		// Read in particle's image and wrap periodic boundary  //zhoge: Ineffective now
 		//int3 image = d_image[idx]; //zhoge
 		//box.wrap(pos, image);  //zhoge: Do not wrap in the Euler midstep. Allow particles to temporarily step out.
@@ -161,14 +197,34 @@ extern "C" __global__ void Integrator_ExplicitEuler_Shear_kernel(Scalar4 *d_pos_
 		// write out the results
 		d_pos_out[idx] = make_scalar4(pos.x, pos.y, pos.z, pos4.w); //last entry doesn't matter
 		//d_image[idx] = image;  //zhoge
+		
+		
+
+		// Rotate the director, pv_new = qv*pv*qv^*
+		Scalar3 pv_new = (q0*q0-dot(qv,qv))*pv;
+		pv_new += 2.*dot(qv,pv)*qv;
+		Scalar3 qcp = make_scalar3( qv.y*pv.z-qv.z*pv.y,
+					    qv.z*pv.x-qv.x*pv.z,
+					    qv.x*pv.y-qv.y*pv.x);
+		pv_new += 2.*q0*qcp;
+		Scalar pvm = sqrtf( dot(pv_new,pv_new) );
+		pv_new = pv_new/pvm;  //make it a unit vector
+
+		// Update the orientation
+		d_ori_out[idx] = pv_new;
+		
+		
 	}
 }
 
 
-extern "C" __global__ void Integrator_RK_Shear_kernel(Scalar coef_1, Scalar4 *d_pos_in_1,
-						      Scalar coef_2, Scalar4 *d_pos_in_2,
-						      Scalar4 *d_pos_out,
+extern "C" __global__ void Integrator_RK_Shear_kernel(Scalar coef_1, Scalar4 *d_pos_in_1, Scalar3 *d_ori_in_1,
+						      Scalar coef_2, Scalar4 *d_pos_in_2, Scalar3 *d_ori_in_2,
+						      Scalar4 *d_pos_out, Scalar3 *d_ori_out,
 						      float *d_Velocity,
+						      float B1,
+						      float *d_sqm_B1_mask,
+						      Scalar3 *d_noise_ang,
 						      int3 *d_image,
 						      unsigned int *d_group_members,
 						      unsigned int group_size,
@@ -194,13 +250,48 @@ extern "C" __global__ void Integrator_RK_Shear_kernel(Scalar coef_1, Scalar4 *d_
 		Scalar3 pos  = coef_1 * pos1 + coef_2 * pos2; 
 		  
 		// read the particle's velocity and update position
-		float ux = d_Velocity[ 6*idx ];
+		float ux = d_Velocity[ 6*idx     ];
 		float uy = d_Velocity[ 6*idx + 1 ];
 		float uz = d_Velocity[ 6*idx + 2 ];
-		Scalar3 vel = make_scalar3( ux, uy, uz);
+		float wx = d_Velocity[ 6*idx + 3 ];
+		float wy = d_Velocity[ 6*idx + 4 ];
+		float wz = d_Velocity[ 6*idx + 5 ];
 
+		//////////////////////// uncomment if 2D (zhoge)
+		//uz = 0.;
+		//wx = 0.;
+		//wy = 0.;
+		
+		Scalar3 vel = make_scalar3( ux, uy, uz);
+		Scalar3 omg = make_scalar3( wx, wy, wz);
+		
 	        // Add the shear
 	        vel.x += shear_rate * pos.y;
+		omg.z -= shear_rate/2.;
+
+		// Add noise
+		omg += d_noise_ang[idx];
+		
+		// Form the unit quaternion for rotation
+		Scalar  q0 = 1.0;                     //real part (default)
+		Scalar3 qv = make_scalar3(0.,0.,0.);  //imag part (default)
+		Scalar abs_omg = sqrtf(dot(omg,omg));
+		if (abs_omg > 1e-6) {                 //if rotate
+		  Scalar3 axi = omg/abs_omg;          //axis of rotation
+		  Scalar angm = abs_omg * dt * coef_3;//magnitude
+		  q0 = cos(angm/2.);                  //real part
+		  qv = axi * sin(angm/2.);            //imag part
+		}
+		
+		// Read the particle director (average of the two previous directions)
+		Scalar3 pv1 = d_ori_in_1[idx];
+		Scalar3 pv2 = d_ori_in_2[idx];
+		Scalar3 pv  = pv1*coef_1 + pv2*coef_2;  //zhoge: not unit length, but shouldn't matter ##to check
+		Scalar pvm0 = sqrtf( dot(pv,pv) );
+		pv = pv/pvm0;  //make it a unit vector
+
+		// Minus the active slip
+		vel -= (-2./3.*B1*d_sqm_B1_mask[idx])*pv;
 
 		// Move the positions	
 		Scalar3 dx = vel * dt * coef_3;
@@ -213,6 +304,22 @@ extern "C" __global__ void Integrator_RK_Shear_kernel(Scalar coef_1, Scalar4 *d_
 		// write out the results
 		d_pos_out[idx] = make_scalar4(pos.x, pos.y, pos.z, 0.0); //last entry doesn't matter
 		d_image[idx] = image;
+		
+		
+
+		// Rotate the director, pv_new = qv*pv*qv^*
+		Scalar3 pv_new = (q0*q0-dot(qv,qv))*pv;
+		pv_new += 2.*dot(qv,pv)*qv;
+		Scalar3 qcp = make_scalar3( qv.y*pv.z-qv.z*pv.y,
+					    qv.z*pv.x-qv.x*pv.z,
+					    qv.x*pv.y-qv.y*pv.x);
+		pv_new += 2.*q0*qcp;
+		Scalar pvm = sqrtf( dot(pv_new,pv_new) );
+		pv_new = pv_new/pvm;  //make it a unit vector for regularity
+
+		// Update the orientation
+		d_ori_out[idx] = pv_new; 
+		
 	}
 }
 
@@ -554,6 +661,8 @@ void Integrator_RFD(
 	dt			(input)  integration timestep
 	shear_rate		(input)	 shear rate for imposed shear flow
 	d_pos			(input)  particle positions
+	sqm_B2                  (input)  B2 mode coef (spherical squirmers)
+	d_ori                   (input)  particle orientations
 	d_image			(input)  particle periodic image
 	d_group_members		(input)  ID of particle within integration group
 	group_size		(input)  number of particles
@@ -567,22 +676,24 @@ void Integrator_RFD(
 */
 void Integrator_ComputeVelocity(     unsigned int timestep,
 				     unsigned int output_period,
-			
-					float *d_AppliedForce,
-					float *d_Velocity,
-					float dt,
-					float shear_rate,
-					Scalar4 *d_pos,
-					int3 *d_image,
-					unsigned int *d_group_members,
-					unsigned int group_size,
-					const BoxDim& box,
-					KernelData *ker_data,
-					BrownianData *bro_data,
-					MobilityData *mob_data,
-					ResistanceData *res_data,
-					WorkData *work_data
-					){
+				     float *d_AppliedForce,
+				     float *d_Velocity,
+				     float dt,
+				     float shear_rate,
+				     Scalar4 *d_pos,
+				     float sqm_B2,
+				     float *d_sqm_B2_mask,
+				     Scalar3 *d_ori,
+				     int3 *d_image,
+				     unsigned int *d_group_members,
+				     unsigned int group_size,
+				     const BoxDim& box,
+				     KernelData *ker_data,
+				     BrownianData *bro_data,
+				     MobilityData *mob_data,
+				     ResistanceData *res_data,
+				     WorkData *work_data
+				     ){
 	
 	// Dereference kernel data for grid and threads
 	dim3 grid = ker_data->particle_grid;
@@ -597,20 +708,19 @@ void Integrator_ComputeVelocity(     unsigned int timestep,
 
 	// Get divergence from RFD, and use that to initialize the velocity
 	if ( (bro_data->T) > 0.0 ){
-		Integrator_RFD(
-				d_Velocity,
-				d_pos,
-				d_image,
-				d_group_members,
-				group_size,
-				box,
-				pBuffer,
-				ker_data,
-				bro_data,
-				mob_data,
-				res_data,
-				work_data
-				);
+	  Integrator_RFD(
+			 d_Velocity,
+			 d_pos,
+			 d_image,
+			 d_group_members,
+			 group_size,
+			 box,
+			 pBuffer,
+			 ker_data,
+			 bro_data,
+			 mob_data,
+			 res_data,
+			 work_data);
 	}
 	
 	// RHS and Solution Vectors
@@ -621,97 +731,104 @@ void Integrator_ComputeVelocity(     unsigned int timestep,
 	Saddle_ZeroOutput_kernel<<<grid,threads>>>( d_solution, group_size );
 	
 	// Compute far-field stochastic slip velocity
-	Brownian_FarField_SlipVelocity(	
-					d_rhs, // Far-field slip is first 11*N entries of RHS vector
-					d_pos,
-                                	d_group_members,
-                                	group_size,
-                                	box,
-                                	dt,
-					bro_data,
-					mob_data,
-					ker_data,
-					work_data
-					);
+	if ( (bro_data->T) > 0.0 ){
+	  Brownian_FarField_SlipVelocity(	
+					 d_rhs, // Far-field slip is first 11*N entries of RHS vector
+					 d_pos,
+					 d_group_members,
+					 group_size,
+					 box,
+					 dt,
+					 bro_data,
+					 mob_data,
+					 ker_data,
+					 work_data);
+	}
 
-	// Add the ambient rate of strain to the right-hand side
-	//Integrator_AddStrainRate_kernel<<< grid, threads >>>( d_rhs, shear_rate, group_size );
-	Integrator_AddStrainRate_kernel<<< grid, threads >>>( d_rhs,
-							      -shear_rate,    //correction by madhu
-							      group_size ); 
+	// Add Einf-E to RHS
+	Integrator_AddStrainRate_kernel<<< grid, threads >>>(d_rhs,
+							     shear_rate,     //zhoge: now consistent sign with FSD paper
+							     d_group_members,
+							     sqm_B2,         //zhoge: input B2 mode coef
+							     d_sqm_B2_mask,
+							     d_ori,          //zhoge: input orientation (unit vector)
+							     group_size ); 
 
 	// Compute the near-field stochastic force
-	Brownian_NearField_Force(
-					&d_rhs[ 11*group_size ], // Near-field Brownian force is last 6*N entries of RHS vector
-					d_pos,
-					d_group_members,
-					group_size,
-					box,
-					dt,
-					pBuffer,
-					ker_data,
-					bro_data,
-					res_data,
-					work_data
-					);
+	if ( (bro_data->T) > 0.0 ){
+	  Brownian_NearField_Force(
+				   &d_rhs[ 11*group_size ], // Near-field Brownian force is last 6*N entries of RHS vector
+				   d_pos,
+				   d_group_members,
+				   group_size,
+				   box,
+				   dt,
+				   pBuffer,
+				   ker_data,
+				   bro_data,
+				   res_data,
+				   work_data);
+	}
 	
-	// Add imposed force to right-hand side vector (zhoge: It's actually minus force.)
-	Saddle_force2rhs_kernel<<<grid,threads>>>( d_AppliedForce,
-						   d_rhs,
-						   group_size );
+	// Add -F^P to the RHS[11N:17N]
+	Saddle_force2rhs_kernel<<<grid,threads>>>(
+						  d_AppliedForce,
+						  d_rhs,          //output
+						  group_size );
 	
-	// Add the near-field FE force to the right-hand side vector, RFE:Einf
+	// Add RFE_nf:(E-Einf) to the RHS[11N:17N]
 	Lubrication_RFE_kernel<<< grid, threads >>>(
-							&d_rhs[11*group_size],
-							shear_rate,
-							d_pos,
-							d_group_members,
-							group_size, 
-			      				box,
-							res_data->nneigh, 
-							res_data->nlist, 
-							res_data->headlist, 
-							res_data->table_dist,
-							res_data->table_vals,
-							res_data->table_min,
-							res_data->table_dr,
-							res_data->rlub
-							);
+						    &d_rhs[11*group_size],   //output
+						    shear_rate,
+						    d_pos,
+						    sqm_B2,         //zhoge: input B2 mode coef
+						    d_sqm_B2_mask,
+						    d_ori,          //zhoge: input orientation (unit vector)
+						    d_group_members,
+						    group_size, 
+						    box,
+						    res_data->nneigh, 
+						    res_data->nlist, 
+						    res_data->headlist, 
+						    res_data->table_dist,
+						    res_data->table_vals,
+						    res_data->table_min,
+						    res_data->table_dr,
+						    res_data->rlub);
 	
-	// Do the saddle point solve
+	// Do the saddle point solve (the main part of FSD)
+	// In d_solution[0:17N]: far-field forces/torques (first 6N), far-field stresslets (next 5N), relative velocities (last 6N)
 	Solvers_Saddle(
-			d_rhs, 
-			d_solution,
-			d_pos,
-			d_group_members,
-			group_size,
-			box,
-			bro_data->tol,
-			pBuffer,
-			ker_data,
-			mob_data,
-			res_data,
-			work_data
-			);
+		       d_rhs, 
+		       d_solution,  //output
+		       d_pos,
+		       d_group_members,
+		       group_size,
+		       box,
+		       bro_data->tol,
+		       pBuffer,
+		       ker_data,
+		       mob_data,
+		       res_data,
+		       work_data);
 		
-	// Get velocity out of solution vector (in Helper_Saddle.cu)
+	// Get velocity out of solution vector, d_Velocity[0:6N] += d_solution[11N:17N]
 	Saddle_AddFloat_kernel<<<grid,threads>>>( 
-							d_Velocity,			// Velocity is entries 1:(6*N)
-							&d_solution[11*group_size],	// Velocity is entries (11*N+1):(17*N)
-							d_Velocity, 			// Add to self
+							d_Velocity,			
+							&d_solution[11*group_size],    
+							d_Velocity, 	         	//output
 							1.0, 1.0, group_size, 6 );
-
 	
-	// zhoge: Only process stresslets if they are to be written to output files
-	if ( ( output_period > 0 ) && ( int(timestep) % output_period == output_period-1 ) ) //-1 because output in the next step
+	// Only process stresslets if they are to be written to output files
+	if ( ( output_period > 0 ) && ( int(timestep+1) % output_period == 0 ) ) 
 	  {
 	    // Get the far-field stresslet out of solution vector
 	    Saddle_AddFloat_kernel<<<grid,threads>>>( 
 						     &d_Velocity[6*group_size], // stresslet is last 5*N entries
 						     &d_solution[6*group_size], // stresslet is entries (6*N+1):(11*N)
 						     &d_Velocity[6*group_size], // Add to self
-						     1.0,
-						     -1.0,                      // zhoge: Because shear rate was minus
+						     1.0,          
+						     1.0,     //zhoge: corrected sign
 						     group_size, 5 );
 	
 	    // Add the near-field contributions to the stresslet
@@ -736,6 +853,9 @@ void Integrator_ComputeVelocity(     unsigned int timestep,
 	    Lubrication_RSE_kernel<<< grid, threads >>>(
 							&d_Velocity[6*group_size], // output, stresslet is last 5*N entries
 							shear_rate,
+							sqm_B2,         //zhoge: input B2 mode coef
+							d_sqm_B2_mask,
+							d_ori,          //zhoge: input orientation (unit vector)
 							group_size, 
 							d_group_members,
 							res_data->nneigh, 

@@ -161,7 +161,9 @@ struct ResistanceData
   float m_kappa;     //inverse Debye length for electrostatic repulsion 
   float m_beta;      // ratio of Hamaker constant and electrostatic force scale
   float m_epsq;      // square root of the regularization term for vdW
-  
+//  float m_sqm_B1;    // coef for the B1 mode of spherical squirmers
+//  float m_sqm_B2;    // coef for the B2 mode of spherical squirmers
+
 };
 
 //! Declare a structure to hold work spaces required throughout the calculations

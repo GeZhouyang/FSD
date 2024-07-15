@@ -53,7 +53,8 @@ public:
 		Scalar error,
 		std::string fileprefix,
 		int period,
-		Scalar ndsr, Scalar kappa, Scalar k_n, Scalar beta_AF, Scalar epsq  //zhoge
+		Scalar ndsr, Scalar kappa, Scalar k_n, Scalar beta_AF, Scalar epsq, Scalar sqm_B1, Scalar sqm_B2,
+		unsigned int N_mix, Scalar coef_B1_mask, Scalar coef_B2_mask, Scalar rot_diff, Scalar T_ext  //zhoge
 		);
 
   virtual ~Stokes();
@@ -168,6 +169,16 @@ protected:
   Scalar m_k_n;    // collision spring constant (zhoge)
   Scalar m_beta;   // ratio of Hamaker constant and electrostatic force scale
   Scalar m_epsq;   // square root of the regularization term for vdW
+  Scalar m_sqm_B1; // coef for the B1 mode of spherical squirmers
+  Scalar m_sqm_B2; // coef for the B2 mode of spherical squirmers
+  unsigned int m_N_mix;  // number of particles in the first group (when having a mixture)
+  Scalar m_coef_B1_mask; // coef for the B1 mask of spherical squirmers
+  Scalar m_coef_B2_mask; // coef for the B2 mask of spherical squirmers
+  GPUArray<float> m_sqm_B1_mask; // mask array for B1
+  GPUArray<float> m_sqm_B2_mask; // mask array for B2
+  GPUArray<Scalar3> m_noise_ang; // Gaussian noise for the angular velocity
+  Scalar m_rot_diff;  // rotational diffusion coef due to noise
+  Scalar m_T_ext;  // external torque to rotate bottom heavy particles
 
   // ******************************************************************
   // Declare all variables for physical quantities (forces, velocities)

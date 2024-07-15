@@ -41,8 +41,13 @@ extern "C" __global__ void Integrator_ExplicitEuler_kernel(
 
 extern "C" __global__ void Integrator_ExplicitEuler_Shear_kernel(
 								 Scalar4 *d_pos_in,
+								 Scalar3 *d_ori_in,
 								 Scalar4 *d_pos_out,
+								 Scalar3 *d_ori_out,
 								 float *d_Velocity,
+								 float B1,
+								 float *d_sqm_B1_mask,
+								 Scalar3 *d_noise_ang,
 								 int3 *d_image,
 								 unsigned int *d_group_members,
 								 unsigned int group_size,
@@ -52,10 +57,13 @@ extern "C" __global__ void Integrator_ExplicitEuler_Shear_kernel(
 								 );
 
 
-extern "C" __global__ void Integrator_RK_Shear_kernel(Scalar coef_1, Scalar4 *d_pos_in_1,
-						      Scalar coef_2, Scalar4 *d_pos_in_2,
-						      Scalar4 *d_pos_out,
+extern "C" __global__ void Integrator_RK_Shear_kernel(Scalar coef_1, Scalar4 *d_pos_in_1, Scalar3 *d_ori_in_1,
+						      Scalar coef_2, Scalar4 *d_pos_in_2, Scalar3 *d_ori_in_2,
+						      Scalar4 *d_pos_out, Scalar3 *d_ori_out,
 						      float *d_Velocity,
+						      float B1,
+						      float *d_sqm_B1_mask,
+						      Scalar3 *d_noise_ang,
 						      int3 *d_image,
 						      unsigned int *d_group_members,
 						      unsigned int group_size,
@@ -110,22 +118,24 @@ void Integrator_RFD(
 
 void Integrator_ComputeVelocity(     unsigned int timestep,
 				     unsigned int output_period,
-			
-					float *d_AppliedForce,
-					float *d_Velocity,
-					float dt,
-					float shear_rate,
-					Scalar4 *d_pos,
-					int3 *d_image,
-					unsigned int *d_group_members,
-					unsigned int group_size,
-					const BoxDim& box,
-					KernelData *ker_data,
-					BrownianData *bro_data,
-					MobilityData *mob_data,
-					ResistanceData *res_data,
-					WorkData *work_data
-					);
+				     float *d_AppliedForce,
+				     float *d_Velocity,
+				     float dt,
+				     float shear_rate,
+				     Scalar4 *d_pos,
+				     float sqm_B2,
+				     float *d_sqm_B2_mask,
+				     Scalar3 *d_ori,
+				     int3 *d_image,
+				     unsigned int *d_group_members,
+				     unsigned int group_size,
+				     const BoxDim& box,
+				     KernelData *ker_data,
+				     BrownianData *bro_data,
+				     MobilityData *mob_data,
+				     ResistanceData *res_data,
+				     WorkData *work_data
+				     );
 
 
 #endif

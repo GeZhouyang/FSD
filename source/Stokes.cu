@@ -97,6 +97,7 @@ scalar4_tex_t tables1_tex;
 	timestep        (input)         current timestep
 	output_period   (input)         output per output_period steps
 	d_pos		(input/ouput)	array of particle positions
+	d_ori		(input/ouput)	array of particle orientations
 	d_net_force	(input)		particle forces
 	d_vel		(output)	particle velocities
 	d_AppliedForce	(input/output)	Array for force and torque applied on particles
@@ -118,10 +119,16 @@ scalar4_tex_t tables1_tex;
 cudaError_t Stokes_StepOne(     unsigned int timestep,
 				unsigned int output_period,
 				Scalar4 *d_pos,
-				Scalar4 *d_net_force,
-				Scalar4 *d_vel,
+				Scalar3 *d_ori,  
+				//Scalar4 *d_vel,
+				//Scalar4 *d_omg,
 				float *d_AppliedForce,
 				float *d_Velocity,
+				Scalar sqm_B1, Scalar sqm_B2,
+				float *d_sqm_B1_mask,
+				float *d_sqm_B2_mask,
+				Scalar3 *d_noise_ang,
+				Scalar T_ext,
                         	Scalar dt,
 				const float m_error,
 				Scalar shear_rate,
@@ -211,6 +218,7 @@ cudaError_t Stokes_StepOne(     unsigned int timestep,
 	//test rk2//					 );
         Stokes_SetForce_manually_kernel<<<grid,threads>>>(
 							  d_pos,           //input
+							  d_ori,           //input
 							  d_AppliedForce,  //output
 							  group_size,
 							  d_group_members,
@@ -222,19 +230,19 @@ cudaError_t Stokes_StepOne(     unsigned int timestep,
 							  res_data->m_kappa,
 							  res_data->m_beta, 
 							  res_data->m_epsq,
+							  T_ext,
 							  box
 							  );
-
 	
 
 	// RK position storage
 	Scalar4 *pos_rk1;
-	//Scalar4 *pos_rk2;
+	Scalar3 *ori_rk1;
 	//Scalar4 *pos_rk3;
 	//Scalar4 *pos_rk4;
 	
 	cudaMalloc( (void**)&pos_rk1, group_size * sizeof(Scalar4) );
-	//cudaMalloc( (void**)&pos_rk2, group_size * sizeof(Scalar4) );
+	cudaMalloc( (void**)&ori_rk1, group_size * sizeof(Scalar3) );
 	//cudaMalloc( (void**)&pos_rk3, group_size * sizeof(Scalar4) );
 	//cudaMalloc( (void**)&pos_rk4, group_size * sizeof(Scalar4) );
 	
@@ -247,6 +255,9 @@ cudaError_t Stokes_StepOne(     unsigned int timestep,
 				   dt,		 
 				   shear_rate,	 
 				   d_pos,	    //input position
+				   sqm_B2,
+				   d_sqm_B2_mask,
+				   d_ori,           //input: orientation
 				   d_image,	 
 				   d_group_members, 
 				   group_size,	 
@@ -257,10 +268,16 @@ cudaError_t Stokes_StepOne(     unsigned int timestep,
 				   res_data,	 
 				   work_data);
 
+	//// Comment the EU1 and RK2 functions if testing ishikawa (no need to update the positions and orientations)
 	// Make the displacement
-	Integrator_ExplicitEuler_Shear_kernel<<<grid,threads>>>(d_pos,     //input	
+	Integrator_ExplicitEuler_Shear_kernel<<<grid,threads>>>(d_pos,     //input
+								d_ori,     //input	
 								pos_rk1,   //output
+								ori_rk1,   //output
                              					d_Velocity,
+								sqm_B1,
+								d_sqm_B1_mask,
+								d_noise_ang,
                              					d_image,
                              					d_group_members,
                              					group_size,
@@ -269,7 +286,16 @@ cudaError_t Stokes_StepOne(     unsigned int timestep,
 								shear_rate
 								);
 	
+	//// Copy solution velocity to the velocity that HOOMD stores (in Helper_Stokes.cu)
+	//Stokes_SetVelocity_kernel<<<grid,threads>>>(
+	//					    d_vel,  //output (HOOMD intrinsic velocity, Scalar4)
+	//					    d_omg,  //output (HOOMD intrinsic velocity, Scalar4) 
+	//					    d_Velocity,
+	//					    group_size,
+	//					    d_group_members);
+	
 	// second RK step
+	
 	// zhoge: Probably no need to precondition again
 	Precondition_Wrap(pos_rk1,           
 			  d_group_members, 
@@ -278,10 +304,11 @@ cudaError_t Stokes_StepOne(     unsigned int timestep,
 			  ker_data,	   
 			  res_data,	   //input/output (pruned neighbor list)
 			  work_data);
-
+	
 	// Get the midstep interparticle force
         Stokes_SetForce_manually_kernel<<<grid,threads>>>(
 							  pos_rk1,         //input
+							  ori_rk1,         //input
 							  d_AppliedForce,  //output
 							  group_size,
 							  d_group_members,
@@ -293,16 +320,20 @@ cudaError_t Stokes_StepOne(     unsigned int timestep,
 							  res_data->m_kappa,
 							  res_data->m_beta, 
 							  res_data->m_epsq,
+							  T_ext,
 							  box
 							  );
-
+	
 	// Compute particle velocities from central RFD + Saddle point solve (in Integrator.cu)
 	Integrator_ComputeVelocity(timestep, output_period,
 				   d_AppliedForce,  
 				   d_Velocity,      //output (FSD velocity and stresslet, 11N)
 				   dt/2.,		 
 				   shear_rate,	 
-				   pos_rk1,         //input position		 
+				   pos_rk1,         //input position
+				   sqm_B2,
+				   d_sqm_B2_mask, 
+				   ori_rk1,         //input orientation
 				   d_image,	 
 				   d_group_members, 
 				   group_size,	 
@@ -318,10 +349,13 @@ cudaError_t Stokes_StepOne(     unsigned int timestep,
 	Scalar coef_2 = 0.5;
 	Scalar coef_3 = 0.5;
 	
-	Integrator_RK_Shear_kernel<<<grid,threads>>>(coef_1, d_pos,      //input  position
-						     coef_2, pos_rk1,    //input  position
-						     d_pos,              //output position (overwritten)
+	Integrator_RK_Shear_kernel<<<grid,threads>>>(coef_1, d_pos,d_ori,        //input  position/orientation
+						     coef_2, pos_rk1,ori_rk1,    //input  position/orientation
+						     d_pos,d_ori,                //output position/orientation (overwritten)
 						     d_Velocity,
+						     sqm_B1,
+						     d_sqm_B1_mask,
+						     d_noise_ang,
 						     d_image,
 						     d_group_members,
 						     group_size,
@@ -345,21 +379,12 @@ cudaError_t Stokes_StepOne(     unsigned int timestep,
 								);
 	*/
 		
-	// Copy solution velocity to the velocity that HOOMD stores (in Helper_Stokes.cu)
-	// 
-	// Update d_vel after time integration so it stores the velocity at the previous time level
-	// before the next time integration. (zhoge)
-	Stokes_SetVelocity_kernel<<<grid,threads>>>(
-						    d_vel,  //output (HOOMD intrinsic velocity, Scalar4)
-						    d_Velocity,
-						    group_size,
-						    d_group_members);
 	
 	// Cleanup
 	cudaUnbindTexture(tables1_tex);
 
 	cudaFree(pos_rk1);
-	//cudaFree(pos_rk2);
+	cudaFree(ori_rk1);
 	//cudaFree(pos_rk3);
 	//cudaFree(pos_rk4);
 

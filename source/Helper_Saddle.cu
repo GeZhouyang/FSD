@@ -129,8 +129,8 @@ __global__ void Saddle_SplitGeneralizedF_kernel( 	float *d_generalF,
 		float s1 = d_generalF[ ind2 + 0 ];
 		float s2 = d_generalF[ ind2 + 1 ];
 		float s3 = d_generalF[ ind2 + 2 ];
-		float s4 = d_generalF[ ind2 + 3 ];
-		float s5 = d_generalF[ ind2 + 4 ];
+		float s4 = d_generalF[ ind2 + 3 ];  //zhoge: Syz
+		float s5 = d_generalF[ ind2 + 4 ];  //zhoge: Syy
 
 		d_net_force[ idx ] = make_scalar4( f1, f2, f3, 0.0 );
 		d_TorqueStress[ 2*idx + 0 ] = make_scalar4( l1, l2, l3, s1 );
@@ -177,19 +177,6 @@ __global__ void Saddle_MakeGeneralizedU_kernel( 	float *d_generalU,
 		d_generalU[ ind2 + 2 ] = AS2.y;   // E_xz * 2
 		d_generalU[ ind2 + 3 ] = AS2.z;   // E_yz * 2
 		d_generalU[ ind2 + 4 ] = AS2.w;   // E_yy - E_zz
-
-		////zhoge: convert the sign (debug)
-		//d_generalU[ ind1 + 0 ] = - vel.x; 
-		//d_generalU[ ind1 + 1 ] = - vel.y; 
-		//d_generalU[ ind1 + 2 ] = - vel.z; 
-		//d_generalU[ ind1 + 3 ] = - AS1.x; 
-		//d_generalU[ ind1 + 4 ] = - AS1.y; 
-		//d_generalU[ ind1 + 5 ] = - AS1.z; 
-		//d_generalU[ ind2 + 0 ] = - AS1.w; 
-		//d_generalU[ ind2 + 1 ] = - AS2.x; 
-		//d_generalU[ ind2 + 2 ] = - AS2.y; 
-		//d_generalU[ ind2 + 3 ] = - AS2.z; 
-		//d_generalU[ ind2 + 4 ] = - AS2.w; 
 
         }
 }
