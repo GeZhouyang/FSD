@@ -35,9 +35,9 @@ Auxiliary functions:
 >	- Helper_Brownian.cu		: Helper functions used in Brownian_FarField.cu and Brownian_NearField.cu
 >	- Helper_Debug.cu		    : Functions for debugging and code checking, printing output, etc.
 
-An *active* version of the solver for simulations of squirmers is provided in the branch `squirmer`.
-The implementation is based on the Active Stokesian Dynamics framework 
-and is compatible with the original FSD for passive suspensions.
+An *active* version of the solver for simulations of suspensions of squirmers is provided in the branch `squirmer`.
+The implementation is based on the *Active Stokesian Dynamics* framework 
+and is backward compatible with the original FSD for passive suspensions.
 
 ### Reference
 
