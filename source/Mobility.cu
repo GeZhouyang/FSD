@@ -413,7 +413,7 @@ __global__ void Mobility_WaveSpace_Green_kernel(
 		//
 
 		// Scaling factor (imaginary here!)
-		B = (tid==0) ? 0.0 : tk.w * ( sinf( k ) / k ) * ( 3.0 * ( sinf(k) - k*cosf(k) ) / (ksq*k) );
+		B = (tid==0) ? 0.0 : -tk.w * ( sinf( k ) / k ) * ( 3.0 * ( sinf(k) - k*cosf(k) ) / (ksq*k) );  //zhoge: times -1 (Ladd 1990)
 	
 		// Velocity calculation
 		gridX[tid].x += -( Cdkx.y - tk.x*kdcdk.y ) * B;
@@ -430,7 +430,7 @@ __global__ void Mobility_WaveSpace_Green_kernel(
 		//
 
 		// Scaling factor
-		B = (tid==0) ? 0.0 : tk.w * (-1.0) * ( sinf( k ) / k ) * ( 3.0 * ( sinf(k) - k*cosf(k) ) / (ksq*k) );
+		B = (tid==0) ? 0.0 : tk.w * ( sinf( k ) / k ) * ( 3.0 * ( sinf(k) - k*cosf(k) ) / (ksq*k) ); //zhoge: times -1 (Ladd 1990)
 		
 		// Velocity gradient contribution
 		gridXX[tid] = make_scalar2( -( Fkxx.y - kkxx*kdF.y) * B, ( Fkxx.x - kkxx*kdF.x) * B );
@@ -823,8 +823,8 @@ __global__ void Mobility_WaveSpace_ContractD(
 	
 	// Combine components of velocity gradient (because of our definition, have to write out the transpose)
 	if (thread_offset == 0){
-		d_delu[2*idx]   = make_scalar4(velocity[0].x, velocity[block_size].y, velocity[block_size].z, velocity[block_size].w); //zhoge: transpose
-		d_delu[2*idx+1] = make_scalar4(velocity[block_size].x, velocity[0].y, velocity[0].z, velocity[0].w);		       //zhoge: transpose
+		d_delu[2*idx]   = make_scalar4(velocity[0].x, velocity[block_size].y, velocity[block_size].z, velocity[block_size].w);
+		d_delu[2*idx+1] = make_scalar4(velocity[block_size].x, velocity[0].y, velocity[0].z, velocity[0].w);		      
 		//d_delu[2*idx]   = make_scalar4(velocity[0].x, velocity[0].y, velocity[0].z, velocity[0].w);
 		//d_delu[2*idx+1] = make_scalar4(velocity[block_size].x, velocity[block_size].y, velocity[block_size].z, velocity[block_size].w);
 	}
@@ -1098,8 +1098,8 @@ __global__ void Mobility_RealSpace_kernel(
                                 Scalar f1 = tewaldC1m.x + ( tewaldC1p.x - tewaldC1m.x ) * fac;
                                 Scalar f2 = tewaldC1m.y + ( tewaldC1p.y - tewaldC1m.y ) * fac;
 
-                                Scalar g1 = tewaldC1m.z + ( tewaldC1p.z - tewaldC1m.z ) * fac;
-                                Scalar g2 = tewaldC1m.w + ( tewaldC1p.w - tewaldC1m.w ) * fac;
+                                Scalar g1 = -1. * (tewaldC1m.z + ( tewaldC1p.z - tewaldC1m.z ) * fac);  //zhoge: times -1
+                                Scalar g2 = -1. * (tewaldC1m.w + ( tewaldC1p.w - tewaldC1m.w ) * fac);  //zhoge: times -1
 
                                 Scalar h1 = tewaldC2m.x + ( tewaldC2p.x - tewaldC2m.x ) * fac;
                                 Scalar h2 = tewaldC2m.y + ( tewaldC2p.y - tewaldC2m.y ) * fac;
@@ -1167,10 +1167,10 @@ __global__ void Mobility_RealSpace_kernel(
 
 		// Write to output
 		d_vel[idx] = u;
-		//d_delu[2*idx]   = make_scalar4( D[0].x, D[0].y, D[0].z, D[0].w );
-		//d_delu[2*idx+1] = make_scalar4( D[1].x, D[1].y, D[1].z, D[1].w );
-		d_delu[2*idx]   = make_scalar4( D[0].x, D[1].y, D[1].z, D[1].w );
-		d_delu[2*idx+1] = make_scalar4( D[1].x, D[0].y, D[0].z, D[0].w );
+		d_delu[2*idx]   = make_scalar4( D[0].x, D[0].y, D[0].z, D[0].w );  //zhoge: no need to transpose D
+		d_delu[2*idx+1] = make_scalar4( D[1].x, D[1].y, D[1].z, D[1].w );  //zhoge: no need to transpose D
+		//d_delu[2*idx]   = make_scalar4( D[0].x, D[1].y, D[1].z, D[1].w );
+		//d_delu[2*idx+1] = make_scalar4( D[1].x, D[0].y, D[0].z, D[0].w );
 
 	}   
 

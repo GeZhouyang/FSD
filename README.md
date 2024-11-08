@@ -5,6 +5,7 @@ Original authors: Andrew M. Fiore, James W. Swan (MIT)
 >  Note: The original FSD code contains a few minor errors in the lubrication and mobility calculations.
 >  Also, there was a bug causing memory leaks in the preconditioner.
 >  This version fixes those issues and tries to improve the overall performance and clarity.
+>  However, there could always be more bugs, so if you found anything please do not hesitate to contact me.
 
 A brief summary of the main files is given below. Deterministic hydrodynamics:
 
