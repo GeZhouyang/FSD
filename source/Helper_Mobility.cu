@@ -283,9 +283,10 @@ __global__ void Mobility_TS2C_kernel(
                 TS[0] = make_scalar4( d_ts[2*idx].x,   d_ts[2*idx].y,   d_ts[2*idx].z,   d_ts[2*idx].w );
                 TS[1] = make_scalar4( d_ts[2*idx+1].x, d_ts[2*idx+1].y, d_ts[2*idx+1].z, d_ts[2*idx+1].w );
 
-                Scalar Lx = TS[0].x;
-                Scalar Ly = TS[0].y;
-                Scalar Lz = TS[0].z;
+		// zhoge: times -1 to effectively transpose C (because the sign of S is corrected)
+                Scalar Lx = -TS[0].x;
+                Scalar Ly = -TS[0].y;
+                Scalar Lz = -TS[0].z;
 
                 Scalar Sxx = TS[0].w;
                 Scalar Sxy = TS[1].x;
