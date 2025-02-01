@@ -240,6 +240,7 @@ protected:
 
   // Variables for far-field Lanczos iteration
   Scalar4 *m_work_bro_ff_psi;
+  float *m_work_bro_gauss;  //zhoge: Gaussian random variables (type float for cuRand)
   Scalar4 *m_work_bro_ff_UBreal;
   Scalar  *m_work_bro_ff_Tm;
   Scalar4 *m_work_bro_ff_v;

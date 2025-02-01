@@ -1,6 +1,7 @@
 // This file is part of the PSEv3 plugin, released under the BSD 3-Clause License
 //
 // Andrew Fiore
+// Zhouyang Ge
 
 #include "Brownian_NearField.cuh"
 #include "Precondition.cuh"
@@ -15,6 +16,9 @@ using namespace hoomd;
 
 #include <stdio.h>
 #include <math.h>
+
+#include <curand.h>
+#include <cuda_runtime.h>
 
 // LAPACK and CBLAS
 #include "lapacke.h"
@@ -410,8 +414,7 @@ void Brownian_NearField_Lanczos(
 
 
 /*
-	Wrap all the functions required to compute the compute the near-field
-	Brownian force and compute that force.
+	Wrap all the functions required to compute the near-field Brownian force.
 	
 	d_FBnf			(output) near-field Brownian force
 	d_pos			(input)  particle positions
@@ -423,62 +426,67 @@ void Brownian_NearField_Lanczos(
 	bro_data		(input)  structure containing Brownian calculation information
 	res_data		(input)  structure containing lubrication calculation information
 	work_data		(input)	 structure containing workspaces
-
 */
-void Brownian_NearField_Force(
-				Scalar *d_FBnf, // output
-				Scalar4 *d_pos,
-				unsigned int *d_group_members,
-                                unsigned int group_size,
-                                const BoxDim& box,
-                                Scalar dt,
-				void *pBuffer,
-				KernelData *ker_data,
-				BrownianData *bro_data,
-				ResistanceData *res_data,
-				WorkData *work_data
-				){
+void Brownian_NearField_Force(Scalar *d_FBnf, // output
+			      Scalar4 *d_pos,
+			      unsigned int *d_group_members,
+			      unsigned int group_size,
+			      const BoxDim& box,
+			      Scalar dt,
+			      void *pBuffer,
+			      KernelData *ker_data,
+			      BrownianData *bro_data,
+			      ResistanceData *res_data,
+			      WorkData *work_data
+			      )
+{
 
-	// Kernel Information
-	dim3 grid = ker_data->particle_grid;
-	dim3 threads = ker_data->particle_threads;
+  //// Kernel Information
+  //dim3 grid = ker_data->particle_grid;
+  //dim3 threads = ker_data->particle_threads;
 
-	// Only do work if Temperature is positive
-	if ( (bro_data->T) > 0.0 ){
 
-		// Initialize vectors
-		float *d_Psi_nf = (work_data->bro_nf_psi);
+  // Initialize vectors
+  float *d_Psi_nf = (work_data->bro_nf_psi);
 
-		// Generate the random vectors on each particle
-		Brownian_NearField_RNG_kernel<<<grid,threads>>>( 
-								d_Psi_nf,
-								group_size,
-								bro_data->seed_nf,
-								bro_data->T,
-								dt
-								);
+  //zhoge//// Generate the random vectors on each particle
+  //zhoge//Brownian_NearField_RNG_kernel<<<grid,threads>>>( 
+  //zhoge//						  d_Psi_nf,  //output
+  //zhoge//						  group_size,
+  //zhoge//						  bro_data->seed_nf,
+  //zhoge//						  bro_data->T,
+  //zhoge//						  dt);
+
+  
+  //zhoge: use cuRand to generate Gaussian variables
+  curandGenerator_t gen;
+  unsigned int N_random = 6*group_size;                           //6 because force (3) and torque (3)
+  float std_bro = sqrtf( 2.0 * bro_data->T / dt );                //standard deviation of the Brownian force
+  //curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_DEFAULT);         //default generator (xorwow)
+  curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_PHILOX4_32_10);   //fastest      
+  curandSetPseudoRandomGeneratorSeed(gen, bro_data->seed_nf);     //set the seed (different from the ff)
+  curandGenerateNormal(gen, d_Psi_nf, N_random, 0.0f, std_bro);   //mean 0, std as specified
+  curandDestroyGenerator(gen);  
+
+
+  
 		
-		// Apply the Lanczos method
-		Brownian_NearField_Lanczos( 	
-						d_FBnf,   // output
-						d_Psi_nf, // input
-						d_pos,
-						d_group_members,
-                        		        group_size,
-                        		        box,
-						dt,
-						pBuffer,
-						ker_data,
-						bro_data,
-						res_data,
-						work_data
-						);
+  // Apply the Lanczos method
+  Brownian_NearField_Lanczos( 	
+			     d_FBnf,   // output
+			     d_Psi_nf, // input
+			     d_pos,
+			     d_group_members,
+			     group_size,
+			     box,
+			     dt,
+			     pBuffer,
+			     ker_data,
+			     bro_data,
+			     res_data,
+			     work_data);
 		
-		// Clean Up
-		d_Psi_nf = NULL;
-
-	} // Check if T > 0.0 
+  // Clean Up
+  d_Psi_nf = NULL;
 
 }
-
-

@@ -999,6 +999,9 @@ void Stokes::AllocateWorkSpaces(){
 
 	// Variables for far-field Lanczos iteration	
 	cudaMalloc( (void**)&m_work_bro_ff_psi,		3*group_size * sizeof(Scalar4) );
+	//zhoge: Gaussian variables for Brownian calculations
+	cudaMalloc( (void**)&m_work_bro_gauss,		(12*group_size + 6*m_Nx*m_Ny*m_Nz) * sizeof(float) );
+	
 	cudaMalloc( (void**)&m_work_bro_ff_UBreal,	3*group_size * sizeof(Scalar4) );
 	cudaMalloc( (void**)&m_work_bro_ff_Tm,		m_max * sizeof(Scalar) );
 	cudaMalloc( (void**)&m_work_bro_ff_v,		3*group_size*sizeof(Scalar4) );
@@ -1049,6 +1052,7 @@ void Stokes::FreeWorkSpaces(){
 
 	// Variables for far-field Lanczos iteration	
 	cudaFree( m_work_bro_ff_psi );
+	cudaFree( m_work_bro_gauss );  //zhoge
 	cudaFree( m_work_bro_ff_UBreal );
 	cudaFree( m_work_bro_ff_Tm );
 	cudaFree( m_work_bro_ff_v );
@@ -1370,6 +1374,7 @@ void Stokes::integrateStepOne(unsigned int timestep)
 	WorkData work_struct = {
 				dot_sum,
 				m_work_bro_ff_psi,
+				m_work_bro_gauss,  //zhoge: Gaussian random variables
 				m_work_bro_ff_UBreal,
 				m_work_bro_ff_Tm,
 				m_work_bro_ff_v,

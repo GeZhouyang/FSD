@@ -1,6 +1,7 @@
 // This file is part of the PSEv3 plugin, released under the BSD 3-Clause License
 //
 // Andrew Fiore
+// Zhouyang Ge
 
 #include "Brownian_FarField.cuh"
 #include "Mobility.cuh"
@@ -14,6 +15,9 @@ using namespace hoomd;
 
 #include <stdio.h>
 #include <math.h>
+
+#include <curand.h>
+#include <cuda_runtime.h>
 
 #include "lapacke.h"
 #include "cblas.h"
@@ -41,55 +45,52 @@ using namespace hoomd;
 	d_group_members		(input)  index to particle arrays
 	seed			(input)  seed for random number generation
 */
-__global__ void Brownian_FarField_RNG_Particle_kernel(
-							Scalar4 *d_psi,
-							unsigned int group_size,
-							unsigned int *d_group_members,
-							const unsigned int seed
-							){
+__global__ void Brownian_FarField_RNG_Particle_kernel(Scalar4 *d_psi,
+						      unsigned int group_size,
+						      unsigned int *d_group_members,
+						      const unsigned int seed
+						      )
+{
+  // Thread index
+  int idx = blockDim.x * blockIdx.x + threadIdx.x;
 
-	// Thread index
-	int idx = blockDim.x * blockIdx.x + threadIdx.x;
+  // Check if thread is in bounds, and if so do work
+  if (idx < group_size)
+    {
+      // Initialize random number generator
+      detail::Saru s(idx, seed);
+      
+      // Square root of 3 (variance of uniform distribution in [-1,1] is 1/3)
+      float sqrt3 = 1.732050807568877;
+      		
+      //
+      float randomx, randomy, randomz, randomw;
+      
+      // First bit (force)
+      randomx = s.f( -sqrt3, sqrt3 );
+      randomy = s.f( -sqrt3, sqrt3 );
+      randomz = s.f( -sqrt3, sqrt3 );
+      randomw = s.f( -sqrt3, sqrt3 );
+      
+      d_psi[ idx ] = make_scalar4( randomx, randomy, randomz, randomw );
+      
+      // Second bit (torque and Sxx)
+      randomx = s.f( -sqrt3, sqrt3 );
+      randomy = s.f( -sqrt3, sqrt3 );
+      randomz = s.f( -sqrt3, sqrt3 );
+      randomw = s.f( -sqrt3, sqrt3 );
+      
+      d_psi[ group_size + 2*idx ] = make_scalar4( randomx, randomy, randomz, randomw );
+      		
+      // Third bit (Sxy, Sxz, Syz, Syy)
+      randomx = s.f( -sqrt3, sqrt3 );
+      randomy = s.f( -sqrt3, sqrt3 );
+      randomz = s.f( -sqrt3, sqrt3 );
+      randomw = s.f( -sqrt3, sqrt3 );
+      
+      d_psi[ group_size + 2*idx+1 ] = make_scalar4( randomx, randomy, randomz, randomw );
 
-	// Check if thread is in bounds, and if so do work
-	if (idx < group_size) {
-
-                // Initialize random number generator
-                detail::Saru s(idx, seed);
-
-		// Square root of 3
-		float sqrt3 = 1.732050807568877;
-		
-		//
-		float randomx, randomy, randomz, randomw;
-
-		// First bit 
-		randomx = s.f( -sqrt3, sqrt3 );
-		randomy = s.f( -sqrt3, sqrt3 );
-		randomz = s.f( -sqrt3, sqrt3 );
-		randomw = s.f( -sqrt3, sqrt3 );
-
-		d_psi[ idx ] = make_scalar4( randomx, randomy, randomz, randomw );
-
-		// Second bit
-		randomx = s.f( -sqrt3, sqrt3 );
-		randomy = s.f( -sqrt3, sqrt3 );
-		randomz = s.f( -sqrt3, sqrt3 );
-		randomw = s.f( -sqrt3, sqrt3 );
-
-		d_psi[ group_size + 2*idx ] = make_scalar4( randomx, randomy, randomz, randomw );
-		
-		// Third bit
-		randomx = s.f( -sqrt3, sqrt3 );
-		randomy = s.f( -sqrt3, sqrt3 );
-		randomz = s.f( -sqrt3, sqrt3 );
-		randomw = s.f( -sqrt3, sqrt3 );
-
-		d_psi[ group_size + 2*idx+1 ] = make_scalar4( randomx, randomy, randomz, randomw );
-
-
-	}
-
+    }
 }
 
 /*!
@@ -109,11 +110,11 @@ __global__ void Brownian_FarField_RNG_Particle_kernel(
 	dt		(input)  simulation time step size
 	quadW		(input)  quadrature weight for spectral Ewald integration
 */
-__global__ void Brownian_FarField_RNG_Grid1of2_kernel(  	
-								CUFFTCOMPLEX *gridX,
+__global__ void Brownian_FarField_RNG_Grid1of2_kernel(  	CUFFTCOMPLEX *gridX,
 								CUFFTCOMPLEX *gridY,
 								CUFFTCOMPLEX *gridZ,
 								Scalar4 *gridk,
+								float *d_gauss2,
 				        			unsigned int NxNyNz,
 								int Nx,
 								int Ny,
@@ -122,111 +123,121 @@ __global__ void Brownian_FarField_RNG_Grid1of2_kernel(
 								Scalar T,
 								Scalar dt,
 								Scalar quadW
-				             			){
+				             			)
+{
+  // Thread index
+  int idx = blockDim.x * blockIdx.x + threadIdx.x;
 
-	// Thread index
-	int idx = blockDim.x * blockIdx.x + threadIdx.x;
-
-	// Do work if thread is in bounds
-	if ( idx < NxNyNz ) {
+  // Do work if thread is in bounds
+  if ( idx < NxNyNz ) {
  
-		// Scaling factor for covaraince based on Fluctuation-Dissipation
-		// 	fac1 = sqrt( 2.0 * T / dt / quadW );
-		// Scaling factor for covariance of random uniform on [-1,1]
-		// 	fac2 = sqrt( 3.0 )
-		// Scaling factor because each number has real and imaginary part
-		// 	fac3 = 1 / sqrt( 2.0 )	
-		// Total scaling factor
-		//	fac = fac1 * fac2 * fac3 
-		//	    = sqrt( 3.0 * T / dt / quadW )
-		Scalar fac = sqrtf( 3.0 * T / dt / quadW );
+    //zhoge//// Scaling factor for covaraince based on Fluctuation-Dissipation
+    //zhoge//// 	fac1 = sqrt( 2.0 * T / dt / quadW );
+    //zhoge//// Scaling factor for covariance of random uniform on [-1,1]
+    //zhoge//// 	fac2 = sqrt( 3.0 )
+    //zhoge//// Scaling factor because each number has real and imaginary part
+    //zhoge//// 	fac3 = 1 / sqrt( 2.0 )	
+    //zhoge//// Total scaling factor
+    //zhoge////	fac = fac1 * fac2 * fac3 
+    //zhoge////	    = sqrt( 3.0 * T / dt / quadW )
+    //zhoge//Scalar fac = sqrtf( 3.0 * T / dt / quadW );
+    //zhoge//
+    //zhoge//// Get random numbers 
+    //zhoge//detail::Saru s(idx, seed);
+    //zhoge//		
+    //zhoge//Scalar reX = s.f( -fac, fac );
+    //zhoge//Scalar reY = s.f( -fac, fac );
+    //zhoge//Scalar reZ = s.f( -fac, fac );
+    //zhoge//Scalar imX = s.f( -fac, fac );
+    //zhoge//Scalar imY = s.f( -fac, fac );
+    //zhoge//Scalar imZ = s.f( -fac, fac );
 
-		// Get random numbers 
-                detail::Saru s(idx, seed);
-		
-		Scalar reX = s.f( -fac, fac );
-		Scalar reY = s.f( -fac, fac );
-		Scalar reZ = s.f( -fac, fac );
+    //zhoge: use Gaussian random variables
+    Scalar fac = sqrtf( T / dt / quadW );
+    
+    Scalar reX = fac * d_gauss2[ idx     ];
+    Scalar reY = fac * d_gauss2[ idx + 1 ];
+    Scalar reZ = fac * d_gauss2[ idx + 2 ];
+    Scalar imX = fac * d_gauss2[ idx + 3 ];
+    Scalar imY = fac * d_gauss2[ idx + 4 ];
+    Scalar imZ = fac * d_gauss2[ idx + 5 ];
 
-		Scalar imX = s.f( -fac, fac );
-		Scalar imY = s.f( -fac, fac );
-		Scalar imZ = s.f( -fac, fac );
+    
+    // Indices for current grid point
+    int kk = idx % Nz;
+    int jj = ( ( idx - kk ) / Nz ) % Ny;
+    int ii = ( ( idx - kk ) / Nz - jj ) / Ny;
 		
-		// Indices for current grid point
-		int kk = idx % Nz;
-		int jj = ( ( idx - kk ) / Nz ) % Ny;
-		int ii = ( ( idx - kk ) / Nz - jj ) / Ny;
-		
-		// Only have to do the work for half the grid points	
-		if ( 	!( 2 * kk >= Nz + 1 ) &&  // Lower half of the cube across the z-plane
-			!( ( kk == 0 ) && ( 2 * jj >= Ny + 1 ) ) && // lower half of the plane across the y-line
-			!( ( kk == 0 ) && ( jj == 0 ) && ( 2 * ii >= Nx + 1 ) ) && // lower half of the line across the x-point
-			!( ( kk == 0 ) && ( jj == 0 ) && ( ii == 0 ) ) // ignore origin
+    // Only have to do the work for half the grid points	
+    if ( 	!( 2 * kk >= Nz + 1 ) &&  // Lower half of the cube across the z-plane
+		!( ( kk == 0 ) && ( 2 * jj >= Ny + 1 ) ) && // lower half of the plane across the y-line
+		!( ( kk == 0 ) && ( jj == 0 ) && ( 2 * ii >= Nx + 1 ) ) && // lower half of the line across the x-point
+		!( ( kk == 0 ) && ( jj == 0 ) && ( ii == 0 ) ) // ignore origin
 		) {
 
-			// Is current grid point a nyquist point
-			bool ii_nyquist = ( ( ii == Nx/2 ) && ( Nx/2 == (Nx+1)/2 ) );
-			bool jj_nyquist = ( ( jj == Ny/2 ) && ( Ny/2 == (Ny+1)/2 ) );
-			bool kk_nyquist = ( ( kk == Nz/2 ) && ( Nz/2 == (Nz+1)/2 ) );
+      // Is current grid point a nyquist point
+      bool ii_nyquist = ( ( ii == Nx/2 ) && ( Nx/2 == (Nx+1)/2 ) );
+      bool jj_nyquist = ( ( jj == Ny/2 ) && ( Ny/2 == (Ny+1)/2 ) );
+      bool kk_nyquist = ( ( kk == Nz/2 ) && ( Nz/2 == (Nz+1)/2 ) );
 			
-			// Index of conjugate point
-			int ii_conj, jj_conj, kk_conj;
-			if ( ii == 0 || ii_nyquist ){
-				ii_conj = ii;
-			}
-			else {
-				ii_conj = Nx - ii;
-			}
-			if ( jj == 0 || jj_nyquist ){
-				jj_conj = jj;
-			}
-			else {
-				jj_conj = Ny - jj;
-			}
-			if ( kk == 0 || kk_nyquist ){
-				kk_conj = kk;
-			}
-			else {
-				kk_conj = Nz - kk;
-			}
+      // Index of conjugate point
+      int ii_conj, jj_conj, kk_conj;
+      if ( ii == 0 || ii_nyquist ){
+	ii_conj = ii;
+      }
+      else {
+	ii_conj = Nx - ii;
+      }
+      if ( jj == 0 || jj_nyquist ){
+	jj_conj = jj;
+      }
+      else {
+	jj_conj = Ny - jj;
+      }
+      if ( kk == 0 || kk_nyquist ){
+	kk_conj = kk;
+      }
+      else {
+	kk_conj = Nz - kk;
+      }
 		
-			// Index of conjugate grid point
-			int conj_idx = ii_conj * Ny*Nz + jj_conj * Nz + kk_conj;
+      // Index of conjugate grid point
+      int conj_idx = ii_conj * Ny*Nz + jj_conj * Nz + kk_conj;
 		
-			// Nyquist points
-			if ( ( ii == 0    && jj_nyquist && kk == 0 ) ||
-			     ( ii_nyquist && jj == 0    && kk == 0 ) ||
-			     ( ii_nyquist && jj_nyquist && kk == 0 ) ||
-			     ( ii == 0    && jj == 0    && kk_nyquist ) ||
-			     ( ii == 0    && jj_nyquist && kk_nyquist ) ||
-			     ( ii_nyquist && jj == 0    && kk_nyquist ) ||
-			     ( ii_nyquist && jj_nyquist && kk_nyquist ) ){
+      // Nyquist points
+      if ( ( ii == 0    && jj_nyquist && kk == 0 ) ||
+	   ( ii_nyquist && jj == 0    && kk == 0 ) ||
+	   ( ii_nyquist && jj_nyquist && kk == 0 ) ||
+	   ( ii == 0    && jj == 0    && kk_nyquist ) ||
+	   ( ii == 0    && jj_nyquist && kk_nyquist ) ||
+	   ( ii_nyquist && jj == 0    && kk_nyquist ) ||
+	   ( ii_nyquist && jj_nyquist && kk_nyquist ) ){
 	
-				// Since forces only have real part, they have to be rescaled to have variance 1	
-				float sqrt2 = 1.414213562373095;
-				gridX[idx] = make_scalar2( sqrt2*reX, 0.0 );
-				gridY[idx] = make_scalar2( sqrt2*reY, 0.0 );
-				gridZ[idx] = make_scalar2( sqrt2*reZ, 0.0 );
+	// Since forces only have real part, they have to be rescaled to have variance 1	
+	float sqrt2 = 1.414213562373095;
+	gridX[idx] = make_scalar2( sqrt2*reX, 0.0 );
+	gridY[idx] = make_scalar2( sqrt2*reY, 0.0 );
+	gridZ[idx] = make_scalar2( sqrt2*reZ, 0.0 );
 
-			}
-			else {
+      }
+      else {
 		
 
-				// Record Force
-				gridX[idx] = make_scalar2( reX, imX );
-				gridY[idx] = make_scalar2( reY, imY );
-				gridZ[idx] = make_scalar2( reZ, imZ );
+	// Record Force
+	gridX[idx] = make_scalar2( reX, imX );
+	gridY[idx] = make_scalar2( reY, imY );
+	gridZ[idx] = make_scalar2( reZ, imZ );
 				
-				// Conjugate points: F(k_conj) = conj( F(k) )
-				gridX[conj_idx] = make_scalar2( reX, -imX );
-				gridY[conj_idx] = make_scalar2( reY, -imY );
-				gridZ[conj_idx] = make_scalar2( reZ, -imZ );
+	// Conjugate points: F(k_conj) = conj( F(k) )
+	gridX[conj_idx] = make_scalar2( reX, -imX );
+	gridY[conj_idx] = make_scalar2( reY, -imY );
+	gridZ[conj_idx] = make_scalar2( reZ, -imZ );
 				
-			} // Check for Nyquist
+      } // Check for Nyquist
 		
-		} // Check if lower half of grid
+    } // Check if lower half of grid
 
-    	} // Check if thread in bounds
+  } // Check if thread in bounds
 }
 
 
@@ -234,9 +245,9 @@ __global__ void Brownian_FarField_RNG_Grid1of2_kernel(
 	Fluctuating force calculation. Step 2: Scaling to get action of square root of wave
 					       space contribution to the Ewald sum
 
-	d_gridX		(output) x-component of vectors on grid
-	d_gridY		(output) y-component of vectors on grid
-	d_gridZ		(output) z-component of vectors on grid
+	d_gridX		(input/output) x-component of vectors on grid
+	d_gridY		(input/output) y-component of vectors on grid
+	d_gridZ		(input/output) z-component of vectors on grid
 	d_gridXX	(output) xx-component of vectors on grid
 	d_gridXY	(output) xy-component of vectors on grid
 	d_gridXZ	(output) xz-component of vectors on grid
@@ -273,7 +284,7 @@ __global__ void Brownian_FarField_RNG_Grid2of2_kernel(
 					      			int Nx,
 					      			int Ny,
 					      			int Nz,
-				              			const unsigned int seed,
+				              			const unsigned int seed,  //zhoge: unused
 					      			Scalar T,
 					      			Scalar dt,
 					      			Scalar quadW
@@ -372,7 +383,7 @@ __global__ void Brownian_FarField_RNG_Grid2of2_kernel(
 	Edmond Chow and Yousef Saad, PRECONDITIONED KRYLOV SUBSPACE METHODS FOR
 	SAMPLING MULTIVARIATE GAUSSIAN DISTRIBUTIONS, SIAM J. Sci. Comput., 2014
 
-	d_psi			(input)		Random vector for multiplication
+	d_psi			(input)		Random vector for multiplication (zhoge: force, torque and stress)
 	d_pos			(input)		particle positions
 	d_group_members		(input)		indices for particles within the group
 	group_size		(input)		number of particles
@@ -434,7 +445,7 @@ void Brownian_FarField_Lanczos(
 	// Allocate storage
 	// 
 	int m_in = m;
-	int m_max = 100;
+	int m_max = 100; //zhoge: Can probably increase if not converging
 
         // Storage vectors for tridiagonal factorization
 	float *alpha, *beta, *alpha_save, *beta_save;
@@ -475,8 +486,12 @@ void Brownian_FarField_Lanczos(
 	cudaMemcpy( d_vj, d_psi, 3*group_size*sizeof(Scalar4), cudaMemcpyDeviceToDevice );
 	
         Scalar vnorm;
-	Brownian_FarField_Dot1of2_kernel<<< grid_for_dot, thread_for_dot, thread_for_dot*sizeof(Scalar) >>>(d_vj, d_vj, dot_sum, group_size, d_group_members);
-	Brownian_FarField_Dot2of2_kernel<<< 1, thread_for_dot, thread_for_dot*sizeof(Scalar) >>>(dot_sum, grid_for_dot);
+	Brownian_FarField_Dot1of2_kernel<<< grid_for_dot, thread_for_dot, thread_for_dot*sizeof(Scalar) >>>(d_vj, d_vj,
+													    dot_sum, //output
+													    group_size,
+													    d_group_members);
+	Brownian_FarField_Dot2of2_kernel<<< 1, thread_for_dot, thread_for_dot*sizeof(Scalar) >>>(dot_sum, //input/output
+												 grid_for_dot);
 	cudaMemcpy(&vnorm, dot_sum, sizeof(Scalar), cudaMemcpyDeviceToHost);
 	vnorm = sqrtf( vnorm );
 
@@ -485,12 +500,12 @@ void Brownian_FarField_Lanczos(
     	// Compute psi * M * psi ( for step norm )
 	Mobility_RealSpaceFTS(
 				d_pos,
-				d_Mpsi,
-				&d_Mpsi[group_size],
-				d_psi,
-				&d_psi[group_size],
+				d_Mpsi,               //output: linear velocity of particles
+				&d_Mpsi[group_size],  //output: angular velocity and rate of strain of particles
+				d_psi,                //input:  linear force on particles
+				&d_psi[group_size],   //input:  torque and stress on particles
 				(work_data->mob_couplet),
-				(work_data->mob_delu),
+				(work_data->mob_delu),  //zhoge: modified inside !!!
 				d_group_members,
 				group_size,
 				box,
@@ -865,7 +880,8 @@ void Brownian_FarField_Lanczos(
 
 
 /*
-	Compute the Brownian slip due to the far-field hydrodynamic interactions. 
+	Compute the Brownian slip due to the far-field hydrodynamic interactions.
+	zhoge: This also includes the self contribution.
 
 	d_Uslip_ff		(output) Far-field Brownian slip velocity
 	d_pos			(input)  particle positions
@@ -876,229 +892,249 @@ void Brownian_FarField_Lanczos(
 	bro_data		(input)  Structure with information for Brownian calculations
 	mob_data		(input)  Structure with information for Mobility calculations
 	ker_data		(input)  Structure with information for kernel launches
-
 */
-void Brownian_FarField_SlipVelocity(	
-					float *d_Uslip_ff,
-					Scalar4 *d_pos,
-                        	        unsigned int *d_group_members,
-                        	        unsigned int group_size,
-                        	        const BoxDim& box,
-                        	        Scalar dt,
-				        BrownianData *bro_data,
-				        MobilityData *mob_data,
-					KernelData *ker_data,
-					WorkData *work_data
-					){
+void Brownian_FarField_SlipVelocity(float *d_Uslip_ff,
+				    Scalar4 *d_pos,
+				    unsigned int *d_group_members,
+				    unsigned int group_size,
+				    const BoxDim& box,
+				    Scalar dt,
+				    BrownianData *bro_data,
+				    MobilityData *mob_data,
+				    KernelData *ker_data,
+				    WorkData *work_data)
+{
+  // Kernel Stuff
+  dim3 gridNBlock = (ker_data->grid_grid);
+  dim3 gridBlockSize = (ker_data->grid_threads);
 
-	// Only do something if the Temperature is positive
-	if ( (bro_data->T) > 0.0 ){
+  dim3 grid = (ker_data->particle_grid);
+  dim3 threads = (ker_data->particle_threads);
 
-		// Kernel Stuff
-		dim3 gridNBlock = (ker_data->grid_grid);
-		dim3 gridBlockSize = (ker_data->grid_threads);
+  // Initialize storage variables for velocity and angular velocity/rate of strain
+  Scalar4 *d_vel = (work_data->mob_vel);
+  Scalar4 *d_delu = (work_data->mob_delu);
+  Scalar4 *d_delu1 = (work_data->mob_delu1); //zhoge: need this because delu will be modified in the Lanczos by Mobility_RealSpaceFTS
 
-		dim3 grid = (ker_data->particle_grid);
-		dim3 threads = (ker_data->particle_threads);
+  // Real space contribution	
+  Scalar4 *d_Mreal12psi = (work_data->bro_ff_UBreal);
+  Scalar4 *d_psi = (work_data->bro_ff_psi);
 
-		// Initialize storage variables for velocity and angular velocity/rate of strain
-		Scalar4 *d_vel = (work_data->mob_vel);
-		Scalar4 *d_delu = (work_data->mob_delu);
+  //brownian single particle//// Generate uniform distribution (-1,1) on d_psi (zhoge: actually from -sqrt(3) to sqrt(3))
+  //brownian single particle//// VERY IMPORTANT TO USE A DIFFERENT, DE-CORRELATED SEED FROM THE OTHER RANDOM FUNCTION FOR WAVE SPACE!!!!!
+  //brownian single particle//Brownian_FarField_RNG_Particle_kernel<<<grid, threads>>>(d_psi,  //output
+  //brownian single particle//							   group_size,
+  //brownian single particle//							   d_group_members,
+  //brownian single particle//							   bro_data->seed_ff_rs );
 
-		// Real space contribution	
-		Scalar4 *d_Mreal12psi = (work_data->bro_ff_UBreal);
+  //zhoge: use cuRand to generate Gaussian variables
+  curandGenerator_t gen;
+  float *d_gauss = (work_data->bro_gauss);
+  unsigned int N_random = 12*group_size + 6*ker_data->NxNyNz;     //12*group_size because d_psi needs 3 Scalar4 per particle, 6*NxNyNz because 3 complex values per grid point
+  //curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_DEFAULT);       //the default generator (xorwow)
+  //curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_MT19937);       //too slow
+  //curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_MTGP32);        //fast
+  //curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_MRG32K3A);      //slower than MTGP32
+  curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_PHILOX4_32_10);   //fastest      
+  curandSetPseudoRandomGeneratorSeed(gen, bro_data->seed_ff_rs);  //set the seed
+  curandGenerateNormal(gen, d_gauss, N_random, 0.0f, 1.0f);       //mean 0, std 1
+  curandDestroyGenerator(gen);  
 
-		// Generate uniform distribution (-1,1) on d_psi
-		// VERY IMPORTANT TO USE A DIFFERENT, DE-CORRELATED SEED FROM THE OTHER RANDOM FUNCTION FOR WAVE SPACE!!!!!
-		Scalar4 *d_psi = (work_data->bro_ff_psi);
-		Brownian_FarField_RNG_Particle_kernel<<<grid, threads>>>( d_psi, group_size, d_group_members, bro_data->seed_ff_rs );
+  //the first 12N floats goes to d_psi (this takes care of the type difference)
+  cudaMemcpy(d_psi, d_gauss, 12*group_size*sizeof(float), cudaMemcpyDeviceToDevice);  
+
+
+  
+  // Spreading and contraction stuff
+  int P = (mob_data->P);
+  Scalar xi = (mob_data->xi);
+  Scalar eta = (mob_data->eta);
+  Scalar3 gridh = (mob_data->gridh);
+
+  dim3 Cgrid( group_size, 1, 1);
+  int B = ( P < 8 ) ? P : 8;
+  dim3 Cthreads(B, B, B);
 		
-		// Spreading and contraction stuff
-		int P = (mob_data->P);
-		Scalar xi = (mob_data->xi);
-		Scalar eta = (mob_data->eta);
-		Scalar3 gridh = (mob_data->gridh);
+  Scalar quadW = gridh.x * gridh.y * gridh.z;
+  Scalar xisq = xi * xi;
+  Scalar prefac = ( 2.0 * xisq / 3.1415926536 / eta ) * sqrtf( 2.0 * xisq / 3.1415926536 / eta );
+  Scalar expfac = 2.0 * xisq / eta;
+		
+  // ***************
+  // Wave Space Part
+  // ***************
+		
+  // Reset the grid ( remove any previously distributed forces )
+  Mobility_ZeroGrid_kernel<<<gridNBlock,gridBlockSize>>>( mob_data->gridX,  ker_data->NxNyNz );
+  Mobility_ZeroGrid_kernel<<<gridNBlock,gridBlockSize>>>( mob_data->gridY,  ker_data->NxNyNz );
+  Mobility_ZeroGrid_kernel<<<gridNBlock,gridBlockSize>>>( mob_data->gridZ,  ker_data->NxNyNz );
+  Mobility_ZeroGrid_kernel<<<gridNBlock,gridBlockSize>>>( mob_data->gridXX, ker_data->NxNyNz );
+  Mobility_ZeroGrid_kernel<<<gridNBlock,gridBlockSize>>>( mob_data->gridXY, ker_data->NxNyNz );
+  Mobility_ZeroGrid_kernel<<<gridNBlock,gridBlockSize>>>( mob_data->gridXZ, ker_data->NxNyNz );
+  Mobility_ZeroGrid_kernel<<<gridNBlock,gridBlockSize>>>( mob_data->gridYX, ker_data->NxNyNz );
+  Mobility_ZeroGrid_kernel<<<gridNBlock,gridBlockSize>>>( mob_data->gridYY, ker_data->NxNyNz );
+  Mobility_ZeroGrid_kernel<<<gridNBlock,gridBlockSize>>>( mob_data->gridYZ, ker_data->NxNyNz );
+  Mobility_ZeroGrid_kernel<<<gridNBlock,gridBlockSize>>>( mob_data->gridZX, ker_data->NxNyNz );
+  Mobility_ZeroGrid_kernel<<<gridNBlock,gridBlockSize>>>( mob_data->gridZY, ker_data->NxNyNz );
+		
+  // Apply random fluctuation to wave space grid (zhoge: only contains force, no torque or stress)
+  Brownian_FarField_RNG_Grid1of2_kernel<<<gridNBlock,gridBlockSize>>>(mob_data->gridX,
+  								      mob_data->gridY,
+  								      mob_data->gridZ,
+  								      mob_data->gridk,
+  								      &d_gauss[12*group_size], //zhoge: pre-generated Gaussian
+  								      ker_data->NxNyNz,
+  								      mob_data->Nx,
+  								      mob_data->Ny,
+  								      mob_data->Nz,
+  								      bro_data->seed_ff_ws,
+  								      bro_data->T,
+  								      dt,
+  								      quadW);
+  
+  Brownian_FarField_RNG_Grid2of2_kernel<<<gridNBlock,gridBlockSize>>>(mob_data->gridX,  //output
+  								      mob_data->gridY,	//output
+  								      mob_data->gridZ,	//output
+  								      mob_data->gridXX,	//output
+  								      mob_data->gridXY,	//output
+  								      mob_data->gridXZ,	//output
+  								      mob_data->gridYX,	//output
+  								      mob_data->gridYY,	//output
+  								      mob_data->gridYZ,	//output
+  								      mob_data->gridZX,	//output
+  								      mob_data->gridZY,	//output
+  								      mob_data->gridk,
+  								      ker_data->NxNyNz,
+  								      mob_data->Nx,
+  								      mob_data->Ny,
+  								      mob_data->Nz,
+  								      bro_data->seed_ff_ws,
+  								      bro_data->T,
+  								      dt,
+  								      quadW);
+  		
+  // Return rescaled forces to real space
+  cufftExecC2C( mob_data->plan, mob_data->gridX,  mob_data->gridX,  CUFFT_INVERSE);
+  cufftExecC2C( mob_data->plan, mob_data->gridY,  mob_data->gridY,  CUFFT_INVERSE);
+  cufftExecC2C( mob_data->plan, mob_data->gridZ,  mob_data->gridZ,  CUFFT_INVERSE);
+  cufftExecC2C( mob_data->plan, mob_data->gridXX, mob_data->gridXX, CUFFT_INVERSE);
+  cufftExecC2C( mob_data->plan, mob_data->gridXY, mob_data->gridXY, CUFFT_INVERSE);
+  cufftExecC2C( mob_data->plan, mob_data->gridXZ, mob_data->gridXZ, CUFFT_INVERSE);
+  cufftExecC2C( mob_data->plan, mob_data->gridYX, mob_data->gridYX, CUFFT_INVERSE);
+  cufftExecC2C( mob_data->plan, mob_data->gridYY, mob_data->gridYY, CUFFT_INVERSE);
+  cufftExecC2C( mob_data->plan, mob_data->gridYZ, mob_data->gridYZ, CUFFT_INVERSE);
+  cufftExecC2C( mob_data->plan, mob_data->gridZX, mob_data->gridZX, CUFFT_INVERSE);
+  cufftExecC2C( mob_data->plan, mob_data->gridZY, mob_data->gridZY, CUFFT_INVERSE);
+  		
+  // Evaluate contribution of grid velocities at particle centers
+  Mobility_WaveSpace_ContractU<<<Cgrid, Cthreads, (B*B*B+1)*sizeof(float3)>>>(d_pos,
+  									      d_vel,  //output
+  									      mob_data->gridX,
+  									      mob_data->gridY,
+  									      mob_data->gridZ,
+  									      group_size,
+  									      mob_data->Nx,
+  									      mob_data->Ny,
+  									      mob_data->Nz,
+  									      mob_data->xi,
+  									      mob_data->eta,
+  									      d_group_members,
+  									      box,
+  									      P,
+  									      gridh,
+  									      quadW*prefac,
+  									      expfac);
+  
+  Mobility_WaveSpace_ContractD<<<Cgrid, Cthreads, (2*B*B*B+1)*sizeof(float4)>>>(d_pos,
+  										d_delu,  //output
+  										mob_data->gridXX,
+  										mob_data->gridXY,
+  										mob_data->gridXZ,
+  										mob_data->gridYX,
+  										mob_data->gridYY,
+  										mob_data->gridYZ,
+  										mob_data->gridZX,
+  										mob_data->gridZY,
+  										group_size,
+  										mob_data->Nx,
+  										mob_data->Ny,
+  										mob_data->Nz,
+  										mob_data->xi,
+  										mob_data->eta,
+  										d_group_members,
+  										box,
+  										P,
+  										gridh,
+  										quadW*prefac,
+  										expfac);
+  
+  // Convert to Angular velocity and rate of strain (can be done in-place)
+  Mobility_D2WE_kernel<<<grid, threads>>>(d_delu,  //input (wave)
+					  d_delu1, //output (wave)
+					  group_size);
 
-		dim3 Cgrid( group_size, 1, 1);
-		int B = ( P < 8 ) ? P : 8;
-		dim3 Cthreads(B, B, B);
-		
-		Scalar quadW = gridh.x * gridh.y * gridh.z;
-		Scalar xisq = xi * xi;
-		Scalar prefac = ( 2.0 * xisq / 3.1415926536 / eta ) * sqrtf( 2.0 * xisq / 3.1415926536 / eta );
-		Scalar expfac = 2.0 * xisq / eta;
-		
-		// ***************
-		// Wave Space Part
-		// ***************
-		
-		// Reset the grid ( remove any previously distributed forces )
-		Mobility_ZeroGrid_kernel<<<gridNBlock,gridBlockSize>>>( mob_data->gridX,  ker_data->NxNyNz );
-		Mobility_ZeroGrid_kernel<<<gridNBlock,gridBlockSize>>>( mob_data->gridY,  ker_data->NxNyNz );
-		Mobility_ZeroGrid_kernel<<<gridNBlock,gridBlockSize>>>( mob_data->gridZ,  ker_data->NxNyNz );
-		Mobility_ZeroGrid_kernel<<<gridNBlock,gridBlockSize>>>( mob_data->gridXX, ker_data->NxNyNz );
-		Mobility_ZeroGrid_kernel<<<gridNBlock,gridBlockSize>>>( mob_data->gridXY, ker_data->NxNyNz );
-		Mobility_ZeroGrid_kernel<<<gridNBlock,gridBlockSize>>>( mob_data->gridXZ, ker_data->NxNyNz );
-		Mobility_ZeroGrid_kernel<<<gridNBlock,gridBlockSize>>>( mob_data->gridYX, ker_data->NxNyNz );
-		Mobility_ZeroGrid_kernel<<<gridNBlock,gridBlockSize>>>( mob_data->gridYY, ker_data->NxNyNz );
-		Mobility_ZeroGrid_kernel<<<gridNBlock,gridBlockSize>>>( mob_data->gridYZ, ker_data->NxNyNz );
-		Mobility_ZeroGrid_kernel<<<gridNBlock,gridBlockSize>>>( mob_data->gridZX, ker_data->NxNyNz );
-		Mobility_ZeroGrid_kernel<<<gridNBlock,gridBlockSize>>>( mob_data->gridZY, ker_data->NxNyNz );
-		
-		// Apply random fluctuation to wave space grid
-		Brownian_FarField_RNG_Grid1of2_kernel<<<gridNBlock,gridBlockSize>>>(
-											mob_data->gridX,
-											mob_data->gridY,
-											mob_data->gridZ,
-											mob_data->gridk,
-											ker_data->NxNyNz,
-											mob_data->Nx,
-											mob_data->Ny,
-											mob_data->Nz,
-											bro_data->seed_ff_ws,
-											bro_data->T,
-											dt,
-											quadW
-											);
-		Brownian_FarField_RNG_Grid2of2_kernel<<<gridNBlock,gridBlockSize>>>(
-											mob_data->gridX,
-											mob_data->gridY,
-											mob_data->gridZ,
-											mob_data->gridXX,
-											mob_data->gridXY,
-											mob_data->gridXZ,
-											mob_data->gridYX,
-											mob_data->gridYY,
-											mob_data->gridYZ,
-											mob_data->gridZX,
-											mob_data->gridZY,
-											mob_data->gridk,
-											ker_data->NxNyNz,
-											mob_data->Nx,
-											mob_data->Ny,
-											mob_data->Nz,
-											bro_data->seed_ff_ws,
-											bro_data->T,
-											dt,
-											quadW
-											);
-		
-		// Return rescaled forces to real space
-		cufftExecC2C( mob_data->plan, mob_data->gridX,  mob_data->gridX,  CUFFT_INVERSE);
-		cufftExecC2C( mob_data->plan, mob_data->gridY,  mob_data->gridY,  CUFFT_INVERSE);
-		cufftExecC2C( mob_data->plan, mob_data->gridZ,  mob_data->gridZ,  CUFFT_INVERSE);
-		cufftExecC2C( mob_data->plan, mob_data->gridXX, mob_data->gridXX, CUFFT_INVERSE);
-		cufftExecC2C( mob_data->plan, mob_data->gridXY, mob_data->gridXY, CUFFT_INVERSE);
-		cufftExecC2C( mob_data->plan, mob_data->gridXZ, mob_data->gridXZ, CUFFT_INVERSE);
-		cufftExecC2C( mob_data->plan, mob_data->gridYX, mob_data->gridYX, CUFFT_INVERSE);
-		cufftExecC2C( mob_data->plan, mob_data->gridYY, mob_data->gridYY, CUFFT_INVERSE);
-		cufftExecC2C( mob_data->plan, mob_data->gridYZ, mob_data->gridYZ, CUFFT_INVERSE);
-		cufftExecC2C( mob_data->plan, mob_data->gridZX, mob_data->gridZX, CUFFT_INVERSE);
-		cufftExecC2C( mob_data->plan, mob_data->gridZY, mob_data->gridZY, CUFFT_INVERSE);
-		
-		// Evaluate contribution of grid velocities at particle centers
-		Mobility_WaveSpace_ContractU<<<Cgrid, Cthreads, (B*B*B+1)*sizeof(float3)>>>(
-												d_pos,
-												d_vel,
-												mob_data->gridX,
-												mob_data->gridY,
-												mob_data->gridZ,
-												group_size,
-												mob_data->Nx,
-												mob_data->Ny,
-												mob_data->Nz,
-												mob_data->xi,
-												mob_data->eta,
-												d_group_members,
-												box,
-												P,
-												gridh,
-												quadW*prefac,
-												expfac
-												);
-		Mobility_WaveSpace_ContractD<<<Cgrid, Cthreads, (2*B*B*B+1)*sizeof(float4)>>>(
-												d_pos,
-												d_delu,
-												mob_data->gridXX,
-												mob_data->gridXY,
-												mob_data->gridXZ,
-												mob_data->gridYX,
-												mob_data->gridYY,
-												mob_data->gridYZ,
-												mob_data->gridZX,
-												mob_data->gridZY,
-												group_size,
-												mob_data->Nx,
-												mob_data->Ny,
-												mob_data->Nz,
-												mob_data->xi,
-												mob_data->eta,
-												d_group_members,
-												box,
-												P,
-												gridh,
-												quadW*prefac,
-												expfac
-												);
+  
+  // ***************
+  // Real Space Part
+  // ***************
 
-		// Convert to Angular velocity and rate of strain (can be done in-place)
-        	Mobility_D2WE_kernel<<<grid, threads>>>(d_delu, d_delu, group_size);
+  // Compute the square root
+  Brownian_FarField_Lanczos(d_psi,  //input
+  			    d_pos,  //input
+  			    d_group_members,
+  			    group_size,
+  			    box,
+  			    dt,
+  			    d_Mreal12psi,  //output (11N vector of generalized velocity)
+  			    bro_data->T,
+  			    mob_data->xi,
+  			    mob_data->ewald_cut,
+  			    mob_data->ewald_dr,
+  			    mob_data->ewald_n,
+  			    mob_data->ewald_table, 
+  			    mob_data->nneigh,
+  			    mob_data->nlist,
+  			    mob_data->headlist,
+  			    bro_data->m_Lanczos_ff,  //input/output
+  			    bro_data->tol,
+  			    ker_data->particle_grid,
+  			    ker_data->particle_threads,
+  			    mob_data->gridh,
+  			    mob_data->self,
+  			    work_data);  //zhoge: work_data->mob_delu is modified inside (!!)
+  		
+  // Add to wave space part
+  Mobility_LinearCombination_kernel<<<grid, threads>>>( d_Mreal12psi, //input  (real)
+  							d_vel,	      //input  (wave)
+  							d_vel,	      //output (total)
+  							1.0,  //real coefficient
+  							1.0,  //wave coefficient
+  							group_size,
+  							d_group_members);
+  
+  Mobility_Add4_kernel<<<grid, threads>>>( &d_Mreal12psi[group_size], //input  (real) 
+  					   d_delu1,		      //input  (wave) 
+  					   d_delu,		      //output (total)
+  					   1.0,     //real coefficient
+  					   1.0,     //wave coefficient
+  					   group_size );
+  	
 
-		// ***************
-		// Real Space Part
-		// ***************
-
-		// Compute the square root
-		Brownian_FarField_Lanczos(	
-						d_psi,
-						d_pos,
-						d_group_members,
-						group_size,
-						box,
-						dt,
-						d_Mreal12psi,
-						bro_data->T,
-						mob_data->xi,
-						mob_data->ewald_cut,
-						mob_data->ewald_dr,
-						mob_data->ewald_n,
-						mob_data->ewald_table, 
-						mob_data->nneigh,
-						mob_data->nlist,
-						mob_data->headlist,
-						bro_data->m_Lanczos_ff,
-			    			bro_data->tol,
-						ker_data->particle_grid,
-						ker_data->particle_threads,
-						mob_data->gridh,
-			    			mob_data->self,
-						work_data
-						);
-		
-		// Add to wave space part
-		Mobility_LinearCombination_kernel<<<grid, threads>>>( d_Mreal12psi, d_vel, d_vel, 1.0, 1.0, group_size, d_group_members );
-		Mobility_Add4_kernel<<<grid, threads>>>( &d_Mreal12psi[group_size], d_delu, d_delu, 1.0, 1.0, group_size );
+  // ****************
+  // Rearrange Output
+  // ****************
+  Saddle_MakeGeneralizedU_kernel<<<grid,threads>>>(d_Uslip_ff, //output
+						   d_vel,  
+						   d_delu, //angular velocity and rate of strain
+						   group_size);
 	
-		// ****************
-		// Rearrange Output
-		// ****************
-		Saddle_MakeGeneralizedU_kernel<<<grid,threads>>>(
-									d_Uslip_ff, 
-									d_vel,
-									d_delu, // Actually angular velocity and rate of strain
-									group_size
-									);
-	
-		// ********
-		// Clean Up
-		// ********
-		d_vel = NULL;
-		d_delu = NULL;
-		d_Mreal12psi = NULL;
-		d_psi = NULL;
+  // ********
+  // Clean Up
+  // ********
+  
+  d_vel = NULL;
+  d_delu = NULL;
+  d_Mreal12psi = NULL;
+  d_psi = NULL;
 
-	} // Check for positive Temperature
 }
-
-
-

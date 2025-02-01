@@ -1,5 +1,5 @@
-
 // Maintainer: Andrew Fiore
+// Modified by Zhouyang Ge
 
 /*! \file DataStruct.h
     \brief Defines data structures to hold related variables for the different
@@ -173,6 +173,7 @@ struct WorkData
 
 	// Variables for far-field Lanczos iteration	
 	Scalar4 *bro_ff_psi;	//!< (DEVICE) random vector for far-field real space
+	float *bro_gauss;	//zhoge: Gaussian random variables
 	Scalar4 *bro_ff_UBreal;	//!< (DEVICE) real space far-field Brownian displacement
 	Scalar  *bro_ff_Tm;	//!< (DEVICE) Tri-diagonal matrix for square root calculation
 	Scalar4 *bro_ff_v;	//!< (DEVICE) Vector for Lanczos iterations
