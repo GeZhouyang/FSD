@@ -146,9 +146,9 @@ __global__ void Precondition_ApplyRCM_Vector_kernel(
 /*
 	Kernel Function to add identity to the lubrication tensor
 
-	d_L_Val		(input/output)  COO values
-	d_L_RowPtr	(input)  	COO row pointers
-	d_L_ColInd	(input)  	COO column indices
+	d_L_Val		(input/output)  CSR values
+	d_L_RowPtr	(input)  	CSR row pointers
+	d_L_ColInd	(input)  	CSR column indices
 	group_size	(input)  	number of particles
 	ichol_relaxer	(input)  	relaxation factor for the incomplete Cholesky decomposition
 
@@ -395,8 +395,10 @@ __global__ void Precondition_Map_kernel(
 /*! 
 	Build the diagonal preconditioner for the Brownian calculation 
 
+        zhoge: Note, the output is (diag)^(-1/2), where diag is the diagonal element of the reordered RFU (see Precondition_Wrap)
+
 	group_size	(input)  number of particles
-	d_Diag		(output) elements of the diagonal preconditioner
+	d_Diag		(output) elements of the diagonal preconditioner  
 	d_L_RowPtr	(input)  CSR row pointer for RFU
 	d_L_ColInd	(input)  CSR col indices for RFU
 	d_L_Val		(input)  CSR values for RFU
@@ -443,7 +445,7 @@ __global__ void Precondition_GetDiags_kernel(
 					
 					// Get diagonal element
 					d = d_L_Val[ jj ];
-
+					
 					// Diagonal preconditioner
 					if ( d >= 1.0 || d == 0.0 ){
 						d = 1.0;
@@ -451,6 +453,7 @@ __global__ void Precondition_GetDiags_kernel(
 					else {
 						d = sqrtf( 1.0 / d );
 					}
+					
 					break;
 
 				}
@@ -482,7 +485,7 @@ __global__ void Precondition_DiagMult_kernel(
 						float *d_y, // output
 						float *d_x, // input
 						int group_size, 
-						float *d_Diag,
+						float *d_Diag,  //input
 						int direction
 						){
 
@@ -495,7 +498,7 @@ __global__ void Precondition_DiagMult_kernel(
 		// Thread per particle, each thread does work for the 6 rows 
 		// associated with that particle.
 		//
-		// Explicitly unroll the work. 
+		// Explicitly unroll the work. (zhoge: Since d_Diag is (diag)^(-1/2), multiply actually means divide)
 		if ( direction == 1 ){
 			d_y[ 6*tidx + 0 ] = d_x[ 6*tidx + 0 ] * d_Diag[ 6*tidx + 0 ];
 			d_y[ 6*tidx + 1 ] = d_x[ 6*tidx + 1 ] * d_Diag[ 6*tidx + 1 ];
@@ -503,8 +506,8 @@ __global__ void Precondition_DiagMult_kernel(
 			d_y[ 6*tidx + 3 ] = d_x[ 6*tidx + 3 ] * d_Diag[ 6*tidx + 3 ];
 			d_y[ 6*tidx + 4 ] = d_x[ 6*tidx + 4 ] * d_Diag[ 6*tidx + 4 ];
 			d_y[ 6*tidx + 5 ] = d_x[ 6*tidx + 5 ] * d_Diag[ 6*tidx + 5 ];
-		}
-		else if ( direction == -1 ){
+		}					      
+		else if ( direction == -1 ){		      
 			d_y[ 6*tidx + 0 ] = d_x[ 6*tidx + 0 ] / d_Diag[ 6*tidx + 0 ];
 			d_y[ 6*tidx + 1 ] = d_x[ 6*tidx + 1 ] / d_Diag[ 6*tidx + 1 ];
 			d_y[ 6*tidx + 2 ] = d_x[ 6*tidx + 2 ] / d_Diag[ 6*tidx + 2 ];

@@ -327,8 +327,8 @@ __global__ void Lubrication_RFU_kernel(
 		Einf = 	[ 0 g 0 ]
 			[ g 0 0 ]
 			[ 0 0 0 ]
-	where g is the shear rate. Therefore, the strain rate on each particle (due to the imposed straining flow)
-	is identical, so the only needed quantity is the global shear rate.
+	where g is half the shear rate. In simple shear flow, Einf is the same on every particle,
+	but each particle can have its own strain rate (e.g. due to surface slip).
 
 	ALL PARTICLES SAME SIZE -- give one thread per particle
 
@@ -351,6 +351,9 @@ __global__ void Lubrication_RFE_kernel(
 					Scalar *d_Force,
 					Scalar shear_rate,
 					Scalar4 *d_pos,
+					float B2,
+					float *d_sqm_B2_mask,
+					Scalar3 *d_ori,
 					unsigned int *d_group_members,
 					int group_size,
 			      		BoxDim box,
@@ -391,6 +394,15 @@ __global__ void Lubrication_RFE_kernel(
     Ei[3] = 0.0;
     Ei[4] = 0.0;
 
+    //zhoge: minus active strain rate (two minuses cancel out)
+    Scalar3 ppi = d_ori[curr_particle];
+    Scalar  b2i = 0.6*B2*d_sqm_B2_mask[curr_particle];
+    Ei[0] += b2i*(ppi.x*ppi.x -ppi.z*ppi.z); 
+    Ei[1] += b2i*(2.*ppi.x*ppi.y);
+    Ei[2] += b2i*(2.*ppi.x*ppi.z);
+    Ei[3] += b2i*(2.*ppi.y*ppi.z);
+    Ei[4] += b2i*(ppi.y*ppi.y-ppi.z*ppi.z);
+
     // Map to 3x3
     Scalar Eblocki[3][3] = {0.0};
     Eblocki[0][0] = (1.0/3.0) * ( 2.0 * Ei[0] - Ei[4] );
@@ -423,6 +435,15 @@ __global__ void Lubrication_RFE_kernel(
       Ej[2] = 0.0;
       Ej[3] = 0.0;
       Ej[4] = 0.0;
+
+      //zhoge: minus active strain rate (two minuses cancel out)
+      Scalar3 ppj = d_ori[curr_neigh];
+      Scalar  b2j = 0.6*B2*d_sqm_B2_mask[curr_neigh];
+      Ej[0] += b2j*(ppj.x*ppj.x -ppj.z*ppj.z); 
+      Ej[1] += b2j*(2.*ppj.x*ppj.y);
+      Ej[2] += b2j*(2.*ppj.x*ppj.z);
+      Ej[3] += b2j*(2.*ppj.y*ppj.z);
+      Ej[4] += b2j*(ppj.y*ppj.y-ppj.z*ppj.z);
 
       // Map to 3x3
       Scalar Eblockj[3][3] = {0.0};
@@ -909,10 +930,10 @@ __global__ void Lubrication_RSU_kernel(
 		Einf = 	[ 0 g 0 ]
 			[ g 0 0 ]
 			[ 0 0 0 ]
-	where g is the shear rate. Therefore, the strain rate on each particle (due to the imposed straining flow)
-	is identical, so the only needed quantity is the global shear rate.
+	where g is half the shear rate. In simple shear flow, Einf is the same on every particle,
+	but each particle can have its own strain rate (e.g. due to surface slip).
 
-	zhoge: Last correction in Oct 2022
+	zhoge: Last correction in Nov 2022
 
 	\param d_pos  		particle positions
 	\param box		simulation box information
@@ -932,6 +953,9 @@ __global__ void Lubrication_RSU_kernel(
 __global__ void Lubrication_RSE_kernel(
 				       Scalar *d_Stresslet,
 				       Scalar shear_rate,
+				       float B2,
+				       float *d_sqm_B2_mask,
+				       Scalar3 *d_ori,
 				       int group_size,
 				       unsigned int *d_group_members,
 				       const unsigned int *d_n_neigh,
@@ -968,6 +992,15 @@ __global__ void Lubrication_RSE_kernel(
     Ei[3] = 0.0;	//2E_yz
     Ei[4] = 0.0;	//E_yy-E_zz
 
+    //zhoge: minus active strain rate (two minuses cancel out)
+    Scalar3 ppi = d_ori[curr_particle];
+    Scalar  b2i = 0.6*B2*d_sqm_B2_mask[curr_particle];
+    Ei[0] += b2i*(ppi.x*ppi.x -ppi.z*ppi.z); 
+    Ei[1] += b2i*(2.*ppi.x*ppi.y);
+    Ei[2] += b2i*(2.*ppi.x*ppi.z);
+    Ei[3] += b2i*(2.*ppi.y*ppi.z);
+    Ei[4] += b2i*(ppi.y*ppi.y-ppi.z*ppi.z);
+
     // Map to 3x3
     Scalar Eblocki[3][3] = {0.0};
     Eblocki[0][0] = (1.0/3.0) * ( 2.0 * Ei[0] - Ei[4] );
@@ -999,6 +1032,15 @@ __global__ void Lubrication_RSE_kernel(
       Ej[2] = 0.0;
       Ej[3] = 0.0;
       Ej[4] = 0.0;
+
+      //zhoge: minus active strain rate (two minuses cancel out)
+      Scalar3 ppj = d_ori[curr_neigh];
+      Scalar  b2j = 0.6*B2*d_sqm_B2_mask[curr_neigh];
+      Ej[0] += b2j*(ppj.x*ppj.x -ppj.z*ppj.z); 
+      Ej[1] += b2j*(2.*ppj.x*ppj.y);
+      Ej[2] += b2j*(2.*ppj.x*ppj.z);
+      Ej[3] += b2j*(2.*ppj.y*ppj.z);
+      Ej[4] += b2j*(ppj.y*ppj.y-ppj.z*ppj.z);
 
       // Map to 3x3
       Scalar Eblockj[3][3] = {0.0};

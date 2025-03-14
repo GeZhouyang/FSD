@@ -2,7 +2,7 @@
 //
 // Andrew Fiore
 
-#include "Helper_Stokes.cuh"
+#include "Helper_Stokes.cuh"  //zhoge: This includes HOOMDMath.h, which includes cmath
 
 #include <stdio.h>
 
@@ -64,6 +64,7 @@ __global__ void Stokes_SetForce_kernel(
 
 __global__ void Stokes_SetForce_manually_kernel(
 						const Scalar4 *d_pos,     //input
+						Scalar3 *d_ori,           //input
 						float   *d_AppliedForce,  //output
 						unsigned int group_size,
 						unsigned int *d_group_members,
@@ -75,6 +76,7 @@ __global__ void Stokes_SetForce_manually_kernel(
 						const float kappa,
 						const float beta,
 						const float epsq,
+						Scalar T_ext,
 						const BoxDim box
 						){
 
@@ -83,25 +85,42 @@ __global__ void Stokes_SetForce_manually_kernel(
 
   // Do work if thread is in bounds
   if (tidx < group_size) {
-
+    
     unsigned int idx = d_group_members[ tidx ];
 
     Scalar4 posi = d_pos[idx];  // position
-
-    // Interparticle force
-    float F_x = 0.;
-    float F_y = 0.;
-    float F_z = 0.;
+    Scalar3 pdir = d_ori[idx];  // orientation
 
     // Interparticle force parameters
     float h_rough = sqrt(epsq);       //roughness height
     float rcol = 2.0 + 1.0*h_rough;   //collision cutoff
     float F_0 = 1.0/ndsr;             //repulsive force scale (ASSUMING sr = 1.0)
     float Hamaker = F_0*beta;         //Hamaker constant for vdW
+    //float T_ext = 1.0;    //magnitude of the external torque
+    
+    // Interparticle force
+    float F_x = 0.;
+    float F_y = 0.;
+    float F_z = 0.;
+
+    ////test single Brownian particle in a potential (equilibrium at center)
+    //F_x = -0.1*posi.x;
+    //F_y = -0.1*posi.y;
+    //F_z = -0.1*posi.z;
+    
+    // External torque (rotate particles to align with the z-dir)
+    //float T_x = T_ext * ( pdir.y);
+    //float T_y = T_ext * (-pdir.x);
+    //float T_z = T_ext * ( 0.    );
+    // (along z direction)
+    float T_x = T_ext * 0.;
+    float T_y = T_ext * 0.;
+    float T_z = T_ext * 1.;
     
     // Neighborlist arrays
     unsigned int head_idx = d_headlist[ idx ]; // Location in head array for neighbors of current particle
     unsigned int n_neigh  = d_nneigh[ idx ];   // Number of neighbors of the nearest particle
+
 		
     for (unsigned int neigh_idx = 0; neigh_idx < n_neigh; neigh_idx++) {
 
@@ -111,17 +130,21 @@ __global__ void Stokes_SetForce_manually_kernel(
       Scalar4 posj = d_pos[curr_neigh];  // position
       Scalar3 R = make_scalar3( posj.x - posi.x, posj.y - posi.y, posj.z - posi.z );  // distance vector
       R = box.minImage(R);  //periodic BC
-      Scalar  distSqr = dot(R,R);          // Distance magnitude
-      Scalar  dist    = sqrtf( distSqr );  // Distance
+      Scalar  distSqr = dot(R,R);          
+      Scalar  dist    = sqrtf( distSqr );  // Distance magnitude
 
-      Scalar  gap1 = dist - rcol;  //surface gap
-
+      Scalar  gap1 = dist - rcol;  //surface gap for interparticle forces
+      
       float F_app_mag = 0.;  //applied force magnitude
+
+      ////mouad swim3
+      //F_app_mag = 0.1*(dist - (2.0 + 10.0/kappa));  //an attractive spring force
+      //F_app_mag = 1.0*(dist - 3.0);  //spring force with a prescribed dist_eq (test Brownian pair)
       
       // vdW and electrostatic repulsion
-      if (gap1 >= 0. && gap1 <= 10.0/kappa)
-      	F_app_mag = Hamaker/(12.*(gap1*gap1 + epsq)) - F_0 * exp (-kappa * gap1);  //attraction is positive, repulsion is negative
-
+      if (gap1 >= 0. && dist <= 2.0 + 10.0/kappa)
+      	F_app_mag = Hamaker/(12.*(gap1*gap1 + epsq)) - F_0 * expf (-kappa * gap1);  //attraction is positive, repulsion is negative
+      
       // Max vdW - Max electrostatic repulsion - Collision
       if (gap1 < 0.)
       	F_app_mag = Hamaker/(12.*epsq) - F_0 - k_n * abs(gap1);
@@ -141,10 +164,10 @@ __global__ void Stokes_SetForce_manually_kernel(
     d_AppliedForce[ 6*idx     ] = F_x;
     d_AppliedForce[ 6*idx + 1 ] = F_y;
     d_AppliedForce[ 6*idx + 2 ] = F_z;
-    d_AppliedForce[ 6*idx + 3 ] = 0.0;
-    d_AppliedForce[ 6*idx + 4 ] = 0.0;
-    d_AppliedForce[ 6*idx + 5 ] = 0.0;
-
+    d_AppliedForce[ 6*idx + 3 ] = T_x;//0.0;
+    d_AppliedForce[ 6*idx + 4 ] = T_y;//0.0;
+    d_AppliedForce[ 6*idx + 5 ] = T_z;//0.0;
+    
   }
 }
 
@@ -160,6 +183,7 @@ __global__ void Stokes_SetForce_manually_kernel(
 */
 __global__ void Stokes_SetVelocity_kernel(
 						Scalar4 *d_vel,
+						Scalar4 *d_omg,
 						float   *d_Velocity,
 						unsigned int group_size,
 						unsigned int *d_group_members
@@ -171,14 +195,21 @@ __global__ void Stokes_SetVelocity_kernel(
 	// Do work if thread is in bounds
 	if (tidx < group_size) {
 
-		unsigned int idx = d_group_members[ tidx ];
+		Scalar4 vel,omg;
 		
-		Scalar3 vel;
-		vel.x = d_Velocity[ 6*idx     ];
-		vel.y = d_Velocity[ 6*idx + 1 ];
-		vel.z = d_Velocity[ 6*idx + 2 ];
+		unsigned int idx  = d_group_members[ tidx ];
+		unsigned int idx0 = 6*idx;
+		//unsigned int idx1 = 6*group_size + 5*idx;
+		
+		vel.x = d_Velocity[ idx0     ];
+		vel.y = d_Velocity[ idx0 + 1 ];
+		vel.z = d_Velocity[ idx0 + 2 ];
+		omg.x = d_Velocity[ idx0 + 3 ];
+		omg.y = d_Velocity[ idx0 + 4 ];
+		omg.z = d_Velocity[ idx0 + 5 ];
 
-		d_vel[ idx ] = make_scalar4( vel.x, vel.y, vel.z, 0.0 );
+		d_vel[ idx ] = make_scalar4( vel.x, vel.y, vel.z, 0. );
+		d_omg[ idx ] = make_scalar4( omg.x, omg.y, omg.z, 0. );
 
 	}
 }

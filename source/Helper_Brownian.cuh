@@ -1,12 +1,14 @@
 // This file is part of the PSEv3 plugin, released under the BSD 3-Clause License
 //
 // Andrew Fiore
+// Zhouyang Ge
 
 /*! \file Helper_Brownian.cuh
     \brief Declares GPU kernel code for helper functions in Brownian calculations.
 */
 #include "hoomd/ParticleData.cuh"
 #include "hoomd/HOOMDMath.h"
+#include "DataStruct.h"
 
 #include <cufft.h>
 
@@ -40,16 +42,31 @@ __global__ void Brownian_FarField_AddGrids_kernel(CUFFTCOMPLEX *d_a, CUFFTCOMPLE
 
 __global__ void Brownian_Farfield_LinearCombinationFTS_kernel(Scalar4 *d_a, Scalar4 *d_b, Scalar4 *d_c, Scalar coeff_a, Scalar coeff_b, unsigned int group_size, unsigned int *d_group_members);
 
-void Brownian_Sqrt(
-			int m,
-			float *alpha,
-			float *beta,
-			float *alpha_save,
-			float *beta_save,
-			float *W,
-			float *W1,
-			float *Tm,
-			float *d_Tm
-			);
+//void Brownian_Sqrt(
+//			int m,
+//			float *alpha,
+//			float *beta,
+//			float *alpha_save,
+//			float *beta_save,
+//			float *W,
+//			float *W1,
+//			float *Tm,
+//			float *d_Tm
+//			);
+
+
+//zhoge
+void Sqrt_multiply( float *d_V,       //input
+		    float *h_alpha,   //input
+		    float *h_beta,    //input
+		    float *h_alpha1,  //input
+		    float *h_beta1,   //input       
+		    int m,            //input                 
+		    float *d_y,       //output
+		    int numel,
+		    int group_size,
+		    KernelData *ker_data,
+		    WorkData *work_data );
+
 
 #endif

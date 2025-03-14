@@ -1,14 +1,17 @@
 // This file is part of the PSEv3 plugin, released under the BSD 3-Clause License
 //
 // Andrew Fiore
+// Zhouyang Ge
 
 #include "Helper_Brownian.cuh"
+#include "DataStruct.h"
 
 #include <stdio.h>
 
 // LAPACK and CBLAS
 #include "lapacke.h"
 #include "cblas.h"
+#include "cublas_v2.h"
 
 #ifdef WIN32
 #include <cassert>
@@ -219,7 +222,7 @@ __global__ void Brownian_FarField_LanczosMatrixMultiply_kernel(
 
 	d_A 		(input)  matrix, N x m
 	d_x		(input)  multiplying vector, m x 1
-	d_b		(output) result vector, A*x, m x 1
+	d_b		(output) result vector, A*x, N x 1
 	group_size	(input)  number of particles
 	numel		(input)  number of elements in a vector
 	m		(input)  number of iterations ( number of columns of A, length of x )
@@ -352,67 +355,176 @@ __global__ void Brownian_Farfield_LinearCombinationFTS_kernel(
 	d_Tm		(output) 	product fo Vm * sqrt(D) * W * e1, copied to device
 
 */
-void Brownian_Sqrt(
-			int m,
-			float *alpha,
-			float *beta,
-			float *alpha_save,
-			float *beta_save,
-			float *W,
-			float *W1,
-			float *Tm,
-			float *d_Tm
-			){
-		
-	// Save alpha, beta vectors (will be overwritten by lapack)
-	for ( int ii = 0; ii < m; ++ii ){
-		alpha_save[ii] = alpha[ii];
-		beta_save[ii] = beta[ii];
-	}
-	beta_save[m] = beta[m];
+//void Brownian_Sqrt(
+//			int m,
+//			float *alpha,
+//			float *beta,
+//			float *alpha_save,
+//			float *beta_save,
+//			float *W,
+//			float *W1,
+//			float *Tm,
+//			float *d_Tm
+//			){
+//		
+//	// Save alpha, beta vectors (will be overwritten by lapack)
+//	for ( int ii = 0; ii < m; ++ii ){
+//		alpha_save[ii] = alpha[ii];
+//		beta_save[ii] = beta[ii];
+//	}
+//	beta_save[m] = beta[m];
+//
+//	// Compute eigen-decomposition of tridiagonal matrix
+//	// 	alpha (input) - vector of entries on main diagonal
+//	//      alpha (output) - eigenvalues sorted in descending order
+//	//      beta (input) - vector of entries of sub-diagonal
+//	//      beta (output) - overwritten (zeros?)
+//	//      W - (output) - matrix of eigenvectors. ith column corresponds to ith eigenvalue
+//	// 	INFO (output) = 0 if operation was succesful
+//	int INFO = LAPACKE_spteqr( LAPACK_ROW_MAJOR, 'I', m, alpha, &beta[1], W, m );
+//
+//	if ( INFO != 0 ){
+//		printf("Eigenvalue decomposition failed \n");
+//		printf("INFO = %i \n", INFO); 
+//	
+//		printf("\n alpha: \n");
+//		for( int ii = 0; ii < m; ++ii ){
+//			printf("%f \n", alpha_save[ii]);
+//		} 
+//		printf("\n beta: \n");
+//		for( int ii = 0; ii < m; ++ii ){
+//			printf("%f \n", beta_save[ii]);
+//		}
+//		printf("%f \n", beta_save[m]);
+//		exit(EXIT_FAILURE);
+//	}
+//
+//	// Now, we have to compute Tm^(1/2) * e1
+//	for ( int ii = 0; ii < m; ++ii ){
+//	    W1[ii] = sqrtf( alpha[ii] ) * W[ii];
+//	}
+//	// Tm = W * W1 = W * Lambda^(1/2) * W^T * e1
+//	float tempsum;
+//	for ( int ii = 0; ii < m; ++ii ){
+//		tempsum = 0.0;
+//		for ( int jj = 0; jj < m; ++jj ){
+//			int idx = m*ii + jj;
+//
+//			tempsum += W[idx] * W1[jj];
+//		}
+//		Tm[ii] = tempsum;
+//	}
+//
+//	// Copy matrix to GPU
+//	cudaMemcpy( d_Tm, Tm, m*sizeof(Scalar), cudaMemcpyHostToDevice );
+//
+//}
 
-	// Compute eigen-decomposition of tridiagonal matrix
-	// 	alpha (input) - vector of entries on main diagonal
-	//      alpha (output) - eigenvalues sorted in descending order
-	//      beta (input) - vector of entries of sub-diagonal
-	//      beta (output) - overwritten (zeros?)
-	//      W - (output) - matrix of eigenvectors. ith column corresponds to ith eigenvalue
-	// 	INFO (output) = 0 if operation was succesful
-	int INFO = LAPACKE_spteqr( LAPACK_ROW_MAJOR, 'I', m, alpha, &beta[1], W, m );
 
-	if ( INFO != 0 ){
-		printf("Eigenvalue decomposition failed \n");
-		printf("INFO = %i \n", INFO); 
+
+
+
+//zhoge: Re-implement the Chow & Saad method
+
+void Sqrt_multiply( float *d_V,       //input
+		    float *h_alpha,   //input
+		    float *h_beta,    //input
+		    float *h_alpha1,  //input
+		    float *h_beta1,   //input       
+		    int m,            //input                 
+		    float *d_y,       //output
+		    int numel,
+		    int group_size,
+		    KernelData *ker_data,
+		    WorkData *work_data )
+{
+  // Kernel information
+  dim3 grid    = ker_data->particle_grid;
+  dim3 threads = ker_data->particle_threads;
+
+  // Copy alpha and beta to buffers
+  for ( int i = 0; i < m; ++i ){
+    h_alpha1[i] = h_alpha[i];
+    h_beta1[i] = h_beta[i];
+  }
+
+  //m=3;
+  //h_alpha1[0] = 5.0;
+  //h_alpha1[1] = 1.0;
+  //h_alpha1[2] = 4.0;
+  //h_beta1[0]  = 0.0;
+  //h_beta1[1]  = 1.0;
+  //h_beta1[2]  = 1.0;
+
+  //allocate Q or ship it in
+  float *Q = (float*)malloc(m * m * sizeof(float));
+
+  // Eigen decomposition of tridiagonal matrix Tm = Q * Lambda * Q^T using a divide-and-conquer method, see e.g.
+  // https://netlib.org/lapack/explore-html-3.6.1/d9/d48/lapacke__sstedc_8c_a5fe082f06f8da2fd7e2da063413be2d9.html
+  // https://netlib.org/lapack/lug/node70.html
+  // https://netlib.org/lapack/explore-html/d3/d57/group__stedc_gaec55368cca7558e3ac13e04c1347bc27.html
+  int INFO = LAPACKE_sstedc( LAPACK_ROW_MAJOR,  
+			     'I',               //compute eigenvectors of tridiagonal matrix
+			     m,                 //size of Tm
+			     h_alpha1,          //diagonals of Tm (input) and ascending eigenvalues of Tm (output)
+			     &h_beta1[1],       //sub-diagonals of Tm (input), referenced from [1] because [0] is a placeholder (destroyed at output)
+			     Q,                 //output: orthonormal eigenvectors of Tm
+			     m );               //leading dimension of Q
+
+  if ( INFO != 0 or h_alpha1[0] < 0. ){
+    printf("Eigen decomposition had issues (Sqrt_multiply) \n");
+    printf("INFO = %i \n", INFO); 
 	
-		printf("\n alpha: \n");
-		for( int ii = 0; ii < m; ++ii ){
-			printf("%f \n", alpha_save[ii]);
-		} 
-		printf("\n beta: \n");
-		for( int ii = 0; ii < m; ++ii ){
-			printf("%f \n", beta_save[ii]);
-		}
-		printf("%f \n", beta_save[m]);
-		exit(EXIT_FAILURE);
-	}
+    printf("\nEigenvalues: \n");
+    for( int ii = 0; ii < m; ++ii ){
+      printf("%f \n", h_alpha1[ii]);
+    }
+	
+    printf("\nEigenvectors: \n");
+    for( int i = 0; i < m; ++i ){
+      for( int j = 0; j < m; ++j ){
+	printf("%6.3f ", Q[i*m+j]);
+      }
+      printf("\n");
+    }
 
-	// Now, we have to compute Tm^(1/2) * e1
-	for ( int ii = 0; ii < m; ++ii ){
-	    W1[ii] = sqrtf( alpha[ii] ) * W[ii];
-	}
-	// Tm = W * W1 = W * Lambda^(1/2) * W^T * e1
-	float tempsum;
-	for ( int ii = 0; ii < m; ++ii ){
-		tempsum = 0.0;
-		for ( int jj = 0; jj < m; ++jj ){
-			int idx = m*ii + jj;
+    printf("\nProgram aborted.\n");
+    exit(1);
+  }
 
-			tempsum += W[idx] * W1[jj];
-		}
-		Tm[ii] = tempsum;
-	}
+  // Overwrite h_alpha1 with Lambda^(1/2) * Q^T * e1
+  for ( int i = 0; i < m; ++i ){
+    h_alpha1[i] = sqrtf( h_alpha1[i] ) * Q[i];  //the Q index is continuous because of row-major in stedc
+  }
+  
+  // Overwrite h_beta1 with Q * h_alpha1
+  float tempsum;
 
-	// Copy matrix to GPU
-	cudaMemcpy( d_Tm, Tm, m*sizeof(Scalar), cudaMemcpyHostToDevice );
+  for ( int i = 0; i < m; ++i ){
+    tempsum = 0.0;
 
+    for ( int j = 0; j < m; ++j ){
+      int idx = m*i + j;  //again the Q index is continuous (in j) because of row-major in stedc
+
+      tempsum += Q[idx] * h_alpha1[j];
+    }
+    h_beta1[i] = tempsum;
+  }
+  
+  // Copy data to GPU
+  Scalar *d_Tm = work_data->bro_nf_Tm;
+  cudaMemcpy( d_Tm, h_beta1, m*sizeof(Scalar), cudaMemcpyHostToDevice );
+  
+  // d_y = Vm * d_Tm  (zhoge: Though prefixed by NearField, the matrix vector product applies in general.)
+  Brownian_NearField_LanczosMatrixMultiply_kernel<<<grid,threads>>>( d_V,   //input (basis vectors)
+								     d_Tm,  //input (Q * Lambda^(1/2) * Q^T * e1)
+								     d_y,   //output
+								     group_size,
+								     numel,
+								     m);
+
+  // Clean up
+  free(Q);
+	
 }
+

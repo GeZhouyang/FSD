@@ -33,6 +33,10 @@ __global__ void Integrator_ZeroVelocity_kernel(
 __global__ void Integrator_AddStrainRate_kernel( 
 						float *d_b,
 						float shear_rate,
+						unsigned int *d_group_members,
+						float B2,
+						float *d_sqm_B2_mask,
+						Scalar3 *d_ori,						
 						unsigned int N
 						);
 

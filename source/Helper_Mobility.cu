@@ -50,6 +50,7 @@ ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 // Maintainer: joaander
 // Modified by Gang Wang
 // Modified by Andrew Fiore
+// Modified by Zhouyang Ge
 
 
 #include "Helper_Mobility.cuh"
@@ -179,31 +180,46 @@ __global__ void Mobility_Add4_kernel(
 	// Check if thread is in bounds
 	if (idx < group_size) {
 
-		// Get first element
-                Scalar4 A = d_a[2*idx];
-                Scalar4 B = d_b[2*idx];
+		//brownian single particle//// Get first element
+                //brownian single particle//Scalar4 A = d_a[2*idx];
+                //brownian single particle//Scalar4 B = d_b[2*idx];
+		//brownian single particle//
+		//brownian single particle//// Addition for 4 components of the first element
+                //brownian single particle//A.x = coeff_a * A.x + coeff_b * B.x;
+                //brownian single particle//A.y = coeff_a * A.y + coeff_b * B.y;
+                //brownian single particle//A.z = coeff_a * A.z + coeff_b * B.z;
+                //brownian single particle//A.w = coeff_a * A.w + coeff_b * B.w;
+		//brownian single particle//
+		//brownian single particle//// Write out first element
+                //brownian single particle//d_c[2*idx] = make_scalar4(A.x, A.y, A.z, A.w);
+		//brownian single particle//
+		//brownian single particle//// Get second element
+                //brownian single particle//A = d_a[2*idx+1];
+                //brownian single particle//B = d_b[2*idx+1];
+		//brownian single particle//
+		//brownian single particle//// Addition for 4 components of the second element
+                //brownian single particle//A.x = coeff_a * A.x + coeff_b * B.x;
+                //brownian single particle//A.y = coeff_a * A.y + coeff_b * B.y;
+                //brownian single particle//A.z = coeff_a * A.z + coeff_b * B.z;
+                //brownian single particle//A.w = coeff_a * A.w + coeff_b * B.w;
+		//brownian single particle//
+		//brownian single particle//// Write out second element
+                //brownian single particle//d_c[2*idx+1] = make_scalar4(A.x, A.y, A.z, A.w);
 
-		// Addition for 4 components of the first element
-                A.x = coeff_a * A.x + coeff_b * B.x;
-                A.y = coeff_a * A.y + coeff_b * B.y;
-                A.z = coeff_a * A.z + coeff_b * B.z;
-                A.w = coeff_a * A.w + coeff_b * B.w;
 
-		// Write out first element
-                d_c[2*idx] = make_scalar4(A.x, A.y, A.z, A.w);
+		//zhoge
+		int ind = 2*idx;
+		d_c[ind] = make_scalar4(coeff_a*d_a[ind].x + coeff_b*d_b[ind].x,
+					coeff_a*d_a[ind].y + coeff_b*d_b[ind].y,
+					coeff_a*d_a[ind].z + coeff_b*d_b[ind].z,
+					coeff_a*d_a[ind].w + coeff_b*d_b[ind].w);
 
-		// Get second element
-                A = d_a[2*idx+1];
-                B = d_b[2*idx+1];
-
-		// Addition for 4 components of the second element
-                A.x = coeff_a * A.x + coeff_b * B.x;
-                A.y = coeff_a * A.y + coeff_b * B.y;
-                A.z = coeff_a * A.z + coeff_b * B.z;
-                A.w = coeff_a * A.w + coeff_b * B.w;
-
-		// Write out second element
-                d_c[2*idx+1] = make_scalar4(A.x, A.y, A.z, A.w);
+		ind += 1;
+		d_c[ind] = make_scalar4(coeff_a*d_a[ind].x + coeff_b*d_b[ind].x,
+					coeff_a*d_a[ind].y + coeff_b*d_b[ind].y,
+					coeff_a*d_a[ind].z + coeff_b*d_b[ind].z,
+					coeff_a*d_a[ind].w + coeff_b*d_b[ind].w);
+				
         }
 }
 
@@ -230,27 +246,39 @@ __global__ void Mobility_D2WE_kernel(
 
 		// Get the current velocity gradient
                 Scalar4 D[2];
-                D[0] = make_scalar4( d_delu[2*idx].x,   d_delu[2*idx].y,   d_delu[2*idx].z,   d_delu[2*idx].w );
-                D[1] = make_scalar4( d_delu[2*idx+1].x, d_delu[2*idx+1].y, d_delu[2*idx+1].z, d_delu[2*idx+1].w );
+                D[0] = make_scalar4( d_delu[2*idx].x,    //E_xx
+				     d_delu[2*idx].y,	 //E_xy + Omega_z
+				     d_delu[2*idx].z,	 //E_xz - Omega_y
+				     d_delu[2*idx].w	 //E_yz + Omega_x
+				     );			 
+                D[1] = make_scalar4( d_delu[2*idx+1].x,	 //E_yy
+				     d_delu[2*idx+1].y,	 //E_xx - Omega_z
+				     d_delu[2*idx+1].z,	 //E_xz + Omega_y
+				     d_delu[2*idx+1].w	 //E_yz - Omega_x
+				     );
 
 		// Convert to angular velocity and rate of strain
                 Scalar W[3];
                 Scalar E[5];
 
-                W[0] = 0.5 * ( D[0].w - D[1].w );
-                W[1] = 0.5 * ( D[1].z - D[0].z );
-                W[2] = 0.5 * ( D[0].y - D[1].y );
+                W[0] = 0.5 * ( D[0].w - D[1].w );  //Omega_x
+                W[1] = 0.5 * ( D[1].z - D[0].z );  //Omega_y
+                W[2] = 0.5 * ( D[0].y - D[1].y );  //Omega_z
 
-                E[0] = D[0].x;
-                E[1] = 0.5 * ( D[0].y + D[1].y );
-                E[2] = 0.5 * ( D[0].z + D[1].z );
-                E[3] = 0.5 * ( D[0].w + D[1].w );
-                E[4] = D[1].x;
+                E[0] = D[0].x;                     //E_xx
+                E[1] = 0.5 * ( D[0].y + D[1].y );  //E_xy
+                E[2] = 0.5 * ( D[0].z + D[1].z );  //E_xz
+                E[3] = 0.5 * ( D[0].w + D[1].w );  //E_yz
+                E[4] = D[1].x;			   //E_yy
 
 		// Write output
-                d_omegaE[2*idx]   = make_scalar4( W[0], W[1], W[2], 2*E[0]+E[4] );
-                d_omegaE[2*idx+1] = make_scalar4( 2*E[1], 2*E[2], 2*E[3], 2*E[4]+E[0] );
-                
+                d_omegaE[2*idx]   = make_scalar4( W[0], W[1], W[2],
+						  2*E[0]+E[4] );   //E_xx-E_zz
+                d_omegaE[2*idx+1] = make_scalar4( 2*E[1],	   //2*E_xy
+						  2*E[2],	   //2*E_xz
+						  2*E[3],	   //2*E_yz
+						  2*E[4]+E[0] );   //E_yy-E_zz
+		
         }
 }
 
@@ -280,18 +308,19 @@ __global__ void Mobility_TS2C_kernel(
 		// Torque is first 3 elements of the 2 scalar4s
 		// Stresslet is last 5 elements of the 2 scalar4s
                 Scalar4 TS[2];
-                TS[0] = make_scalar4( d_ts[2*idx].x,   d_ts[2*idx].y,   d_ts[2*idx].z,   d_ts[2*idx].w );
+                TS[0] = make_scalar4( d_ts[2*idx].x,   d_ts[2*idx].y,   d_ts[2*idx].z,   d_ts[2*idx].w   );
                 TS[1] = make_scalar4( d_ts[2*idx+1].x, d_ts[2*idx+1].y, d_ts[2*idx+1].z, d_ts[2*idx+1].w );
 
 		// zhoge: times -1 to effectively transpose C (because the sign of S is corrected)
-                Scalar Lx = -TS[0].x;
-                Scalar Ly = -TS[0].y;
+                Scalar Lx = -TS[0].x;  
+                Scalar Ly = -TS[0].y;  
                 Scalar Lz = -TS[0].z;
+		
 
                 Scalar Sxx = TS[0].w;
                 Scalar Sxy = TS[1].x;
                 Scalar Sxz = TS[1].y;
-                Scalar Syz = TS[1].z;
+                Scalar Syz = TS[1].z;  //zhoge: It is not Syy !!! (The html document is wrong)
                 Scalar Syy = TS[1].w;
 
 		// Compute the couplet from torque and stresslet
@@ -367,11 +396,11 @@ __global__ void Mobility_SetGridk_kernel(
 
                 // Scaling factor used in wave space sum
                 if (i == 0 && j == 0 && k == 0){
-                        gridk_value.w = 0.0;
+		  gridk_value.w = 0.0;
                 }
                 else{
-                        // Have to divide by Nx*Ny*Nz to normalize the FFTs
-                        gridk_value.w = 6.0*3.1415926536 * (1.0 + k2/4.0/xisq) * expf( -(1-eta) * k2/4.0/xisq ) / ( k2 ) / Scalar( Nx*Ny*Nz );
+		  // Have to divide by Nx*Ny*Nz to normalize the FFTs
+		  gridk_value.w = 6.0*3.1415926536 *(1.0 + k2/4.0/xisq) * expf( -(1-eta) * k2/4.0/xisq ) / ( k2 ) / Scalar( Nx*Ny*Nz );
                 }
 
 		// Write output

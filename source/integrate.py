@@ -51,7 +51,8 @@ class PSEv3(hoomd.md.integrate._integration_method):
                  friction_type = "none",
                  h0 = 0.0,
                  alpha = [ 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 ],
-                 ndsr = 1e-1, kappa = 1/0.05, k_n = 1e4, beta_AF = 1e-4, epsq = 1e-5):
+                 ndsr = 1e-1, kappa = 1/0.05, k_n = 1e4, beta_AF = 0., epsq = 1e-5, sqm_B1=0., sqm_B2=0.,
+                 N_mix=1, coef_B1_mask=1.0, coef_B2_mask=1.0, rot_diff=0., T_ext=0., omega_ext=0.):
         
         hoomd.util.print_status_line();
         
@@ -115,7 +116,8 @@ class PSEv3(hoomd.md.integrate._integration_method):
                                             error,
                                             fileprefix,
                                             period,
-                                            ndsr, kappa, k_n, beta_AF, epsq); ##zhoge
+                                            ndsr, kappa, k_n, beta_AF, epsq, sqm_B1, sqm_B2,
+                                            N_mix, coef_B1_mask, coef_B2_mask, rot_diff, T_ext, omega_ext);  ##zhoge
         
         self.cpp_method.validateGroup()
         

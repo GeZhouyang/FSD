@@ -97,6 +97,7 @@ scalar4_tex_t tables1_tex;
 	timestep        (input)         current timestep
 	output_period   (input)         output per output_period steps
 	d_pos		(input/ouput)	array of particle positions
+	d_ori		(input/ouput)	array of particle orientations
 	d_net_force	(input)		particle forces
 	d_vel		(output)	particle velocities
 	d_AppliedForce	(input/output)	Array for force and torque applied on particles
@@ -118,10 +119,18 @@ scalar4_tex_t tables1_tex;
 cudaError_t Stokes_StepOne(     unsigned int timestep,
 				unsigned int output_period,
 				Scalar4 *d_pos,
-				Scalar4 *d_net_force,
-				Scalar4 *d_vel,
+				Scalar3 *d_ori,  
+				Scalar4 *d_pos_gb,
+				//Scalar4 *d_vel,
+				//Scalar4 *d_omg,
 				float *d_AppliedForce,
 				float *d_Velocity,
+				Scalar sqm_B1, Scalar sqm_B2,
+				float *d_sqm_B1_mask,
+				float *d_sqm_B2_mask,
+				Scalar rot_diff,
+				Scalar3 *d_noise_ang,
+				Scalar T_ext,
                         	Scalar dt,
 				const float m_error,
 				Scalar shear_rate,
@@ -182,13 +191,13 @@ cudaError_t Stokes_StepOne(     unsigned int timestep,
 	
 	// Build preconditioner (only do once, because it should still be
 	// sufficiently good for RFD with small displacements)
-	// zhoge: Precisely speaking, this does the Cholesky factorization of -S.
+	// zhoge: It mainly does the incomplete Cholesky factorization of P * (\tilde{R}_FU^nf + relaxer*I) * P^T
 	Precondition_Wrap(d_pos,           
 			  d_group_members, 
 			  group_size,	   
 			  box,		   
 			  ker_data,	   
-			  res_data,	   //input/output (pruned neighbor list)
+			  res_data,
 			  work_data);
 
 //	Debug_Lattice_SpinViscosity(mob_data,res_data,ker_data,work_data,d_pos,d_group_members,group_size,box);
@@ -203,14 +212,9 @@ cudaError_t Stokes_StepOne(     unsigned int timestep,
 	// *******************************************************
 	
 	// Set applied force equal to net_force from HOOMD (pair potentials, external potentials, etc.)
-        //test rk2//Stokes_SetForce_kernel<<<grid,threads>>>(
-	//test rk2//					 d_net_force,    //input (HOOMD intrinsic force, Scalar4)
-	//test rk2//					 d_AppliedForce, //output (FSD force, 6N)
-	//test rk2//					 group_size,	 
-	//test rk2//					 d_group_members 
-	//test rk2//					 );
         Stokes_SetForce_manually_kernel<<<grid,threads>>>(
 							  d_pos,           //input
+							  d_ori,           //input
 							  d_AppliedForce,  //output
 							  group_size,
 							  d_group_members,
@@ -222,24 +226,10 @@ cudaError_t Stokes_StepOne(     unsigned int timestep,
 							  res_data->m_kappa,
 							  res_data->m_beta, 
 							  res_data->m_epsq,
+							  T_ext,
 							  box
 							  );
-
-	
-
-	// RK position storage
-	Scalar4 *pos_rk1;
-	//Scalar4 *pos_rk2;
-	//Scalar4 *pos_rk3;
-	//Scalar4 *pos_rk4;
-	
-	cudaMalloc( (void**)&pos_rk1, group_size * sizeof(Scalar4) );
-	//cudaMalloc( (void**)&pos_rk2, group_size * sizeof(Scalar4) );
-	//cudaMalloc( (void**)&pos_rk3, group_size * sizeof(Scalar4) );
-	//cudaMalloc( (void**)&pos_rk4, group_size * sizeof(Scalar4) );
-	
-	// first RK step
-	
+		
 	// Compute particle velocities from central RFD + Saddle point solve (in Integrator.cu)
 	Integrator_ComputeVelocity(timestep, output_period,
 				   d_AppliedForce,  
@@ -247,6 +237,9 @@ cudaError_t Stokes_StepOne(     unsigned int timestep,
 				   dt,		 
 				   shear_rate,	 
 				   d_pos,	    //input position
+				   sqm_B2,
+				   d_sqm_B2_mask,
+				   d_ori,           //input: orientation
 				   d_image,	 
 				   d_group_members, 
 				   group_size,	 
@@ -257,118 +250,130 @@ cudaError_t Stokes_StepOne(     unsigned int timestep,
 				   res_data,	 
 				   work_data);
 
-	// Make the displacement
-	Integrator_ExplicitEuler_Shear_kernel<<<grid,threads>>>(d_pos,     //input	
-								pos_rk1,   //output
-                             					d_Velocity,
-                             					d_image,
-                             					d_group_members,
-                             					group_size,
-                             					box,
-                             					dt,
-								shear_rate
-								);
-	
-	// second RK step
-	// zhoge: Probably no need to precondition again
-	Precondition_Wrap(pos_rk1,           
-			  d_group_members, 
-			  group_size,	   
-			  box,		   
-			  ker_data,	   
-			  res_data,	   //input/output (pruned neighbor list)
-			  work_data);
+	if ( bro_data->T > 0.0 or rot_diff > 0.0 )  //Euler-Maruyama for stochastic simulations
+	  {
+	    // Make the displacement
+	    Integrator_ExplicitEuler_Shear_kernel<<<grid,threads>>>(d_pos,     //input
+								    d_ori,     //input	
+								    d_pos,     //output (overwrite)
+								    d_ori,     //output (overwrite)
+								    d_pos_gb,  //input/output global position (updated)
+								    d_Velocity,
+								    sqm_B1,
+								    d_sqm_B1_mask,
+								    d_noise_ang,
+								    d_image,
+								    d_group_members,
+								    group_size,
+								    box,
+								    dt,
+								    shear_rate
+								    );
+	  }
+	else  //Runge-Kutta for deterministic simulations
+	  {
+	    // RK position storage
+	    Scalar4 *pos_rk1 = work_data->pos_rk1;
+	    Scalar3 *ori_rk1 = work_data->ori_rk1;
 
-	// Get the midstep interparticle force
-        Stokes_SetForce_manually_kernel<<<grid,threads>>>(
-							  pos_rk1,         //input
-							  d_AppliedForce,  //output
-							  group_size,
-							  d_group_members,
-							  res_data->nneigh, 
-							  res_data->nlist, 
-							  res_data->headlist,
-							  res_data->m_ndsr,
-							  res_data->m_k_n, 
-							  res_data->m_kappa,
-							  res_data->m_beta, 
-							  res_data->m_epsq,
-							  box
-							  );
-
-	// Compute particle velocities from central RFD + Saddle point solve (in Integrator.cu)
-	Integrator_ComputeVelocity(timestep, output_period,
-				   d_AppliedForce,  
-				   d_Velocity,      //output (FSD velocity and stresslet, 11N)
-				   dt/2.,		 
-				   shear_rate,	 
-				   pos_rk1,         //input position		 
-				   d_image,	 
-				   d_group_members, 
-				   group_size,	 
-				   box,		 
-				   ker_data,	 
-				   bro_data,	 
-				   mob_data,	 
-				   res_data,	 
-				   work_data);
+	    // Make an intermediate displacement
+	    Integrator_ExplicitEuler1_Shear_kernel<<<grid,threads>>>(d_pos,     //input
+								     d_ori,     //input	
+								     pos_rk1,   //output
+								     ori_rk1,   //output
+								     d_pos_gb,  //input/output global position (updated)
+								     d_Velocity,
+								     sqm_B1,
+								     d_sqm_B1_mask,
+								     d_noise_ang,
+								     d_image,
+								     d_group_members,
+								     group_size,
+								     box,
+								     dt,
+								     shear_rate
+								     );
+	  
 	
-	// Make the displacement
-	Scalar coef_1 = 0.5;
-	Scalar coef_2 = 0.5;
-	Scalar coef_3 = 0.5;
+	    // second RK step
 	
-	Integrator_RK_Shear_kernel<<<grid,threads>>>(coef_1, d_pos,      //input  position
-						     coef_2, pos_rk1,    //input  position
-						     d_pos,              //output position (overwritten)
-						     d_Velocity,
-						     d_image,
-						     d_group_members,
-						     group_size,
-						     box,
-						     coef_3, dt,       
-						     shear_rate
-						     );
+	    // zhoge: Probably no need to precondition again
+	    Precondition_Wrap(pos_rk1,           
+			      d_group_members, 
+			      group_size,	   
+			      box,		   
+			      ker_data,	   
+			      res_data,	   //input/output (pruned neighbor list)
+			      work_data);
 	
+	    // Get the midstep interparticle force
+	    Stokes_SetForce_manually_kernel<<<grid,threads>>>(
+							      pos_rk1,         //input
+							      ori_rk1,         //input
+							      d_AppliedForce,  //output
+							      group_size,
+							      d_group_members,
+							      res_data->nneigh, 
+							      res_data->nlist, 
+							      res_data->headlist,
+							      res_data->m_ndsr,
+							      res_data->m_k_n, 
+							      res_data->m_kappa,
+							      res_data->m_beta, 
+							      res_data->m_epsq,
+							      T_ext,
+							      box
+							      );
 	
-	/*
-	Integrator_AB2_Shear_kernel<<<grid,threads>>>(timestep, d_vel,
-								d_pos,
-								d_pos,           //output
-                             					d_Velocity,
-                             					d_image,
-                             					d_group_members,
-                             					group_size,
-                             					box,
-                             					dt,
-								shear_rate
-								);
-	*/
+	    // Compute particle velocities from central RFD + Saddle point solve (in Integrator.cu)
+	    Integrator_ComputeVelocity(timestep, output_period,
+				       d_AppliedForce,  
+				       d_Velocity,      //output (FSD velocity and stresslet, 11N)
+				       dt/2.,		 
+				       shear_rate,	 
+				       pos_rk1,         //input position
+				       sqm_B2,
+				       d_sqm_B2_mask, 
+				       ori_rk1,         //input orientation
+				       d_image,	 
+				       d_group_members, 
+				       group_size,	 
+				       box,		 
+				       ker_data,	 
+				       bro_data,	 
+				       mob_data,	 
+				       res_data,	 
+				       work_data);
+	
+	    // Make the final displacement
+	    Scalar coef_1 = 0.5;
+	    Scalar coef_2 = 0.5;
+	    Scalar coef_3 = 0.5;
+	
+	    Integrator_RK_Shear_kernel<<<grid,threads>>>(coef_1, d_pos,d_ori,        //input  position/orientation
+							 coef_2, pos_rk1,ori_rk1,    //input  position/orientation
+							 d_pos,d_ori,                //output position/orientation (overwritten)
+							 d_pos_gb,                   //input/output global position (updated)
+							 d_Velocity,
+							 sqm_B1,
+							 d_sqm_B1_mask,
+							 d_noise_ang,
+							 d_image,
+							 d_group_members,
+							 group_size,
+							 box,
+							 coef_3, dt,       
+							 shear_rate
+							 );
+	    
+	  }
 		
-	// Copy solution velocity to the velocity that HOOMD stores (in Helper_Stokes.cu)
-	// 
-	// Update d_vel after time integration so it stores the velocity at the previous time level
-	// before the next time integration. (zhoge)
-	Stokes_SetVelocity_kernel<<<grid,threads>>>(
-						    d_vel,  //output (HOOMD intrinsic velocity, Scalar4)
-						    d_Velocity,
-						    group_size,
-						    d_group_members);
 	
-	// Cleanup
+	// Clean up
 	cudaUnbindTexture(tables1_tex);
-
-	cudaFree(pos_rk1);
-	//cudaFree(pos_rk2);
-	//cudaFree(pos_rk3);
-	//cudaFree(pos_rk4);
-
 
 	// Error checking
 	gpuErrchk(cudaPeekAtLastError());
 	
-	
 	return cudaSuccess;
-
-
 }

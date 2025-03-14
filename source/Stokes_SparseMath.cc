@@ -158,6 +158,6 @@ void Stokes::setSparseMath(){
         policy_Lt = CUSPARSE_SOLVE_POLICY_USE_LEVEL;
 	
 	// Initialize cuBLAS
-	cublasCreate( &blasHandle );
+	cublasCreate( &blasHandle );  //zhoge: Was here probably because initially only used for lubrication
 
 }

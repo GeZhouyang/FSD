@@ -516,10 +516,10 @@ void Debug_Lattice_SpinViscosity(
 					const BoxDim box
 					){
 
-	// Grid information
-	dim3 grid = ker_data->particle_grid;
-	dim3 threads = ker_data->particle_threads;
-
+	//// Grid information
+	//dim3 grid = ker_data->particle_grid;
+	//dim3 threads = ker_data->particle_threads;
+	
 	//
 	int numel = 6 * group_size;
 
@@ -603,8 +603,8 @@ void Debug_Lattice_ShearViscosity(
 	dim3 grid = ker_data->particle_grid;
 	dim3 threads = ker_data->particle_threads;
 
-	//
-	int numel = 6 * group_size;
+	////
+	//int numel = 6 * group_size;
 
 	// Initialize input and output vector 
 	float *h_x, *d_x;

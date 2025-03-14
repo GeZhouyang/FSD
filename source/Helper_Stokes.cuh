@@ -31,6 +31,7 @@ __global__ void Stokes_SetForce_kernel(
 
 __global__ void Stokes_SetForce_manually_kernel(
 						const Scalar4 *d_pos,
+						Scalar3 *d_ori,
 						float   *d_AppliedForce,
 						unsigned int group_size,
 						unsigned int *d_group_members,
@@ -42,12 +43,14 @@ __global__ void Stokes_SetForce_manually_kernel(
 						const float kappa,
 						const float beta,
 						const float epsq,
+						Scalar T_ext,
 						const BoxDim box
 						);
 
 
 __global__ void Stokes_SetVelocity_kernel(
 						Scalar4 *d_vel,
+						Scalar4 *d_omg,
 						float   *d_Velocity,
 						unsigned int group_size,
 						unsigned int *d_group_members

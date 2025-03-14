@@ -22,9 +22,6 @@ using namespace hoomd;
 
 // LAPACK and CBLAS
 #include "lapacke.h"
-#include "cblas.h"
-
-// cuBLAS
 #include "cublas_v2.h"
 
 #ifdef WIN32
@@ -107,307 +104,287 @@ __global__ void Brownian_NearField_RNG_kernel(
 	work_data		(input)  structure containing workspaces
 
 */
-void Brownian_NearField_Lanczos( 	
-				Scalar *d_FBnf, // output
-				Scalar *d_psi,  // input
-				Scalar4 *d_pos,
-				unsigned int *d_group_members,
-                                unsigned int group_size,
-                                const BoxDim& box,
-                                Scalar dt,
-				void *pBuffer,
-				KernelData *ker_data,
-				BrownianData *bro_data,
-				ResistanceData *res_data,
-				WorkData *work_data
-				){
 
-	// Kernel information
-	dim3 grid = ker_data->particle_grid;
-	dim3 threads = ker_data->particle_threads;
 
-	// Length of vectors
-	int numel = 6 * group_size;
 
-	// Allocate storage
-	// 
-	int m = bro_data->m_Lanczos_nf;
+//zhoge: Re-implemented Chow & Saad (2014) method to sample correlated noise (near-field).
+
+void Lanczos_process( float *d_vm,  //input
+		      float *d_v,   //input
+		      float *d_vp,  //output
+		      float *alpha, //output
+		      float *beta,  //output/input
+		      float tol_beta,
+		      int numel,
+		      const Scalar4 *d_pos,
+		      unsigned int *d_group_members,
+		      const int group_size, 
+		      const BoxDim box,
+		      void *pBuffer,
+		      KernelData *ker_data,
+		      ResistanceData *res_data,
+		      WorkData *work_data )
+{
+  // cuBLAS handle
+  cublasHandle_t blasHandle = work_data->blasHandle;
+
+  // Apply the preconditioned A to d_v (d_vp = G * A * G^T * d_v, where G^T * G = A^{-1} is the preconditioner)
+  Precondition_Brownian_RFUmultiply( d_vp,  // output
+  				     d_v,   // input
+  				     d_pos,
+  				     d_group_members,
+  				     group_size, 
+  				     box,
+  				     pBuffer,
+  				     ker_data,
+  				     res_data );
+    
+  // Project out d_vm (d_vp = d_vp - beta * d_vm)
+  float scale = -1.0 * beta[0];
+  cublasSaxpy( blasHandle, numel, &scale, d_vm, 1, d_vp, 1 );  //d_vp is modified in place
+
+  // The diagonal value associated with dv (alpha = d_v \cdot d_vp)
+  cublasSdot( blasHandle, numel, d_v, 1, d_vp, 1, alpha );
+  
+  // Project out d_v (d_vp = d_vp - alpha * d_v)
+  scale = -1.0 * alpha[0];
+  cublasSaxpy( blasHandle, numel, &scale, d_v, 1, d_vp, 1 );  //d_vp is modified in place
+
+  // The norm of d_vp (betap = || d_vp ||)
+  cublasSnrm2( blasHandle, numel, d_vp, 1, &beta[1] );
+
+  // Check if the norm has become very small and if so, set d_vp = d_v
+  if ( beta[1] < tol_beta )
+    {
+      cudaMemcpy( d_vp, d_v, numel*sizeof(float), cudaMemcpyDeviceToDevice );
+    }
+  else  //otherwise normalize d_vp
+    {
+      scale = 1.0 / beta[1];
+      cublasSscal( blasHandle, numel, &scale, d_vp, 1 );  //d_vp is modified in place
+    }
+  
+}
+
+
+
+
+
+
+void Brownian_NearField_Chow_Saad( Scalar *d_y,  // output: near-field Brownian force
+				   Scalar *d_x,  // input: random Gaussian variables
+				   Scalar4 *d_pos,
+				   unsigned int *d_group_members,
+				   unsigned int group_size,
+				   const BoxDim& box,
+				   //Scalar dt,
+				   void *pBuffer,
+				   KernelData *ker_data,
+				   BrownianData *bro_data,
+				   ResistanceData *res_data,
+				   WorkData *work_data)
+{
+  // cuBLAS handle
+  cublasHandle_t blasHandle = work_data->blasHandle;
+
+  // Constants
+  int numel = 6 * group_size;      //size of v1,v2,...,vm_max, d_x, d_y
+  int m = bro_data->m_Lanczos_nf;  //number of Lanczos iterations in step 1 (either same as last time or reset in Stokes.cc)
+  int m_max = 100;                 //m_max-1 is the maximum size of Tm at the end of step 2 (set to 100 in Stokes.cc)
+
+  //debug
+  if ( m >= m_max-1 )
+    {
+      printf("Illegal condition: m >= m_max-1. Program aborted.");
+      exit(1);
+    }
+  
+  // Host vectors for the main and sub-diagonal values of Tm
+  float *h_alpha  = (float *)malloc( (m_max)*sizeof(float) );
+  float *h_beta   = (float *)malloc( (m_max)*sizeof(float) );
+  float *h_alpha1 = (float *)malloc( (m_max)*sizeof(float) );  //buffer
+  float *h_beta1  = (float *)malloc( (m_max)*sizeof(float) );  //buffer
+
+  // Set the first element of beta to 0
+  h_beta[0] = 0.0;
+
+  // Set the tolerance for beta (less than 1e-6 even for single precision because ||vm|| can be << 1)
+  float tol_beta = 1e-8; 
+
+  // Buffer vector for checking convergence
+  Scalar *d_y0 = work_data->bro_nf_FB_old;  
+
+  // Lanczos basis vectors V = [v0, v1, v2, ..., vm_max], v0 is a placeholder
+  Scalar *d_V = work_data->bro_nf_V;
 	
-	int m_in = m;
-	int m_max = 100;
+  // Zero out v0
+  float scale = 0.0;
+  cublasSscal( blasHandle, numel, &scale, d_V, 1 );
 
-        // Storage vectors for tridiagonal factorization
-	float *alpha, *beta, *alpha_save, *beta_save;
-        alpha = (float *)malloc( (m_max)*sizeof(float) );
-        alpha_save = (float *)malloc( (m_max)*sizeof(float) );
-        beta = (float *)malloc( (m_max+1)*sizeof(float) );
-        beta_save = (float *)malloc( (m_max+1)*sizeof(float) );
+  // Initialize v1 = d_x / ||d_x||
+  float xnorm;
+  cublasSnrm2( blasHandle, numel, d_x, 1, &xnorm );
+  
+  cudaMemcpy( &d_V[numel], d_x, numel*sizeof(float), cudaMemcpyDeviceToDevice );
+  
+  scale = 1.0 / xnorm;
+  cublasSscal( blasHandle, numel, &scale, &d_V[numel], 1 ); 
+  
+  //
+  // Step 1: Build Vm and Tm via the Lanczos process
+  //
+  for ( int j = 0; j < m; ++j )  //iterate at most m times 
+    {
+      // Find Vm and Tm that approximately satisfy Vm^T * A * Vm = Tm
+      Lanczos_process( &d_V[  j   *numel ],  //input
+		       &d_V[ (j+1)*numel ],  //input
+		       &d_V[ (j+2)*numel ],  //output
+		       &h_alpha[ j ],        //output
+		       &h_beta[  j ],        //input [j] / output [j+1]
+		       tol_beta,
+		       numel,
+		       d_pos,
+		       d_group_members,
+		       group_size, 
+		       box,
+		       pBuffer,
+		       ker_data,
+		       res_data,
+		       work_data );
 
-	// Vectors for Lapacke and square root
-	float *W;
-	W = (float *)malloc( (m_max*m_max)*sizeof(float) );
-	float *W1; // W1 = Lambda^(1/2) * ( W^T * e1 )
-	W1 = (float *)malloc( (m_max)*sizeof(float) );
-	float *Tm;
-	Tm = (float *)malloc( m_max*sizeof(float) );
-	Scalar *d_Tm = (work_data->bro_nf_Tm);
+      // Stop if beta becomes very small
+      if ( h_beta[j+1] < tol_beta )
+	{
+	  m = j+1;  //plus 1 because one iteration was done when j=0
+	  break;
+	}		
+    }  
 
-	// Vectors for Lanczos iterations
-	Scalar *d_v = (work_data->bro_nf_v);
+  ////debug
+  //printf("m = %i\n",m);
+  //for (int i=0; i<m; ++i){
+  //  printf("alpha[%2i] = %f\n",i,h_alpha[i]);
+  //}
+  //printf("\n");
+  //for (int i=0; i<m; ++i){
+  //  printf("beta[ %2i] = %f\n",i,h_beta[ i]);
+  //}
+  //exit(1);
 
-	// Storage array for V
-	Scalar *d_V = (work_data->bro_nf_V);
+  
+  //
+  // Step 2: Iteratively compute d_y until convergence
+  //
+  Sqrt_multiply( &d_V[ numel ],  //input
+		 h_alpha,        //input
+		 h_beta,	 //input
+		 h_alpha1,	 //input (buffer)
+		 h_beta1,        //input (buffer)
+		 m,              //input 
+		 d_y0,           //output
+		 numel,
+		 group_size,
+		 ker_data,
+		 work_data );
 
-	// Step-norm things
-	Scalar *d_FBnf_old = (work_data->bro_nf_FB_old);
+  float error = 1.0;
+  float ynorm = 1.0;
 
-	// Pointers for current and previous vector
-	Scalar *d_vjm1 = d_V;
-	Scalar *d_vj   = &d_V[numel];
+  cublasSnrm2( blasHandle, numel, d_y0, 1, &ynorm );
 
-	// Initialize cuBLAS handle
-	cublasHandle_t blasHandle = (res_data->blasHandle);
+  ////debug
+  //printf("Step 2: norm of d_y0 %10.3e\n",ynorm); 
+  //exit(1);
+  
+  while( error > bro_data->tol and m < m_max-1 )
+    {
+      // Iteratively increase m
+      Lanczos_process( &d_V[  m   *numel ],  //input
+		       &d_V[ (m+1)*numel ],  //input
+		       &d_V[ (m+2)*numel ],  //output
+		       &h_alpha[ m ],        //output
+		       &h_beta[  m ],        //input [m] / output [m+1]
+		       tol_beta,
+		       numel,
+		       d_pos,
+		       d_group_members,
+		       group_size, 
+		       box,
+		       pBuffer,
+		       ker_data,
+		       res_data,
+		       work_data );
 
-	// Norm of starting vector (also psi)
-        Scalar vnorm, psinorm;
-	cublasSnrm2( blasHandle, numel, d_psi, 1, &vnorm );
-	psinorm = vnorm;
- 
-        // First iteration
-	// vjm1 = 0 
-	// vj = psi / norm( psi )
-	Scalar scale = 0.0;
-	cublasSscal( blasHandle, numel, &scale, d_vjm1, 1 );
+      // Compute the new approximate solution, d_y
+      Sqrt_multiply( &d_V[ numel ],  //input
+		     h_alpha,        //input
+		     h_beta,	     //input
+		     h_alpha1,	     //input (buffer)
+		     h_beta1,        //input (buffer)
+		     m+1,            //input 
+		     d_y,            //output
+		     numel,
+		     group_size,
+		     ker_data,
+		     work_data );
 
-	cudaMemcpy( d_vj, d_psi, numel*sizeof(Scalar), cudaMemcpyDeviceToDevice );
-	scale = 1.0 / psinorm;
-	cublasSscal( blasHandle, numel, &scale, d_vj, 1 );	
-	
-	//
-	// Do the calculation for 1 fewer iterations than requested so that we can check the step norm
-	//
-	m = m_in - 1;
-	m = m < 1 ? 1 : m;
+      	
+      // Compute relative error = || d_y0 - d_y || / || d_y ||
+      scale = -1.0;
+      cublasSaxpy( blasHandle, numel, &scale, d_y, 1, d_y0, 1 );  //d_y0 is modified in place
+      cublasSnrm2( blasHandle, numel, d_y0, 1, &error );
+      cublasSnrm2( blasHandle, numel, d_y,  1, &ynorm );
+      error /= ynorm;
 
-	Scalar tempalpha = 0.0;
-	Scalar tempbeta = 0.0;
-	beta[ 0 ] = 0.0;
-	for ( int jj = 0; jj < m; ++jj ){
-		
-		// v = M*vj - betaj*vjm1
-		Precondition_Brownian_RFUmultiply(	
-							d_v,       // output
-							d_vj,      // input
-							d_pos,
-							d_group_members,
-							group_size, 
-			      				box,
-							pBuffer,
-							ker_data,
-							res_data
-							);
+      ////debug
+      //printf("Chow & Saad (near-field) iteration %3i, relative error %13.6e (norm of d_y %13.6e)\n",m,error,ynorm);
 
-		scale = -1.0 * tempbeta;
-		cublasSaxpy( blasHandle, numel, &scale, d_vjm1, 1, d_v, 1 );
-	
-		// vj dot v
-		cublasSdot( blasHandle, numel, d_v, 1, d_vj, 1, &tempalpha );
-	       
-		// Store updated alpha
-		alpha[jj] = tempalpha;
-	
-		// v = v - alphaj*vj
-		scale = -1.0 * tempalpha;
-		cublasSaxpy( blasHandle, numel, &scale, d_vj, 1, d_v, 1 );
-		
-		// betajp1 = norm( v ) 
-		cublasSnrm2( blasHandle, numel, d_v, 1, &tempbeta );
-		beta[jj+1] = tempbeta;
-		
-		if ( tempbeta < 1E-8 ){
-			m = jj+1;
-			break;
-		}
+      // Update solution
+      cudaMemcpy( d_y0, d_y, numel*sizeof(float), cudaMemcpyDeviceToDevice );
 
-		// vjp1 = v / betajp1
-		scale = 1.0 / tempbeta;
-		cublasSscal( blasHandle, numel, &scale, d_v, 1 );
-
-		// Store current basis vector
-		cudaMemcpy( &d_V[(jj+2)*numel], d_v, numel*sizeof(Scalar), cudaMemcpyDeviceToDevice );
-
-		// Point vjm1 and vj to proper locations in memory
-		d_vjm1 = &d_V[(jj+1)*numel];
-		d_vj   = &d_V[(jj+2)*numel];
-		
+      // Stop if beta becomes very small (even if the error is not small enough)
+      if ( h_beta[m+1] < tol_beta )
+	{
+	  ++m;
+	  break;
 	}
 
-	//
-	// Evaluate the square root to compute the near-field Force for the current number
-	// of iterations.
-	//
-
-	// Compute the tridiagonal square root on the host, and copy the result to the device
-	Brownian_Sqrt(
-			m,
-			alpha,
-			beta,
-			alpha_save,
-			beta_save,
-			W,
-			W1,
-			Tm,
-			d_Tm
-			);
-
-	// Multiply basis vectors by Tm
-	Brownian_NearField_LanczosMatrixMultiply_kernel<<<grid,threads>>>( &d_V[numel], d_Tm, d_FBnf, group_size, numel, m );
-
-	// Copy velocity
-	cudaMemcpy( d_FBnf_old, d_FBnf, numel*sizeof(Scalar), cudaMemcpyDeviceToDevice );
-
-	// Restore alpha, beta
-	for ( int ii = 0; ii < m; ++ii ){
-		alpha[ii] = alpha_save[ii];
-		beta[ii] = beta_save[ii];
-	}
-	beta[m] = beta_save[m];
-
-	//
-	// Keep adding to basis until step norm is small enough
-	//
-	Scalar stepnorm = 1.0;
-	int jj;
-	while( stepnorm > (bro_data->tol) && m < m_max ){
-		m++;
-		jj = m - 1;
+      // Increment m
+      ++m;
 	
-		//
-		// Do another Lanczos iteration
-		//
-		
-		// v = M*vj - betaj*vjm1
-		Precondition_Brownian_RFUmultiply(	
-							d_v,       // output
-							d_vj,      // input
-							d_pos,
-							d_group_members,
-							group_size, 
-			      				box,
-							pBuffer,
-							ker_data,
-							res_data
-							);
+    }
 
-		scale = -1.0 * tempbeta;
-		cublasSaxpy( blasHandle, numel, &scale, d_vjm1, 1, d_v, 1 );
+  ////debug
+  //printf("\n");
 
-		// vj dot v
-		cublasSdot( blasHandle, numel, d_v, 1, d_vj, 1, &tempalpha );
-	       
-		// Store updated alpha
-		alpha[jj] = tempalpha;
-	
-		// v = v - alphaj*vj
-		scale = -1.0 * tempalpha;
-		cublasSaxpy( blasHandle, numel, &scale, d_vj, 1, d_v, 1 );
-		
-		// betajp1 = norm( v ) 
-		cublasSnrm2( blasHandle, numel, d_v, 1, &tempbeta );
-		beta[jj+1] = tempbeta;
-		
-		if ( tempbeta < 1E-8 ){
-		    m = jj+1;
-		    break;
-		}
+  // Finalize
+  if ( error > bro_data->tol )
+    {
+      printf("\nChow & Saad (near-field) didn't converge after %i iterations.\n",m-1);
+      printf("Final relative error %13.6e\n",error);
+      printf("Last beta %13.6e\n",h_beta[m]);
+      //printf("\nProgram aborted.\n");
+      //exit(1);
+    }
+  
+  // Save the number of required iterations (minus 1 because incremented at the end)
+  bro_data->m_Lanczos_nf = m-1;
 
-		// vjp1 = v / betajp1
-		scale = 1.0 / tempbeta;
-		cublasSscal( blasHandle, numel, &scale, d_v, 1 );
+  //// Undo the preconditioning so that the result has the proper variance
+  //Precondition_Brownian_Undo( d_y,       //input/output
+  //			      group_size,
+  //			      ker_data,
+  //			      res_data );
 
-		// Store current basis vector
-		cudaMemcpy( &d_V[(jj+2)*numel], d_v, numel*sizeof(Scalar), cudaMemcpyDeviceToDevice );
+  // Rescale by original norm of d_x
+  cublasSscal( blasHandle, numel, &xnorm, d_y, 1 );	     
 
-		// Point vjm1 and vj to proper locations in memory
-		d_vjm1 = &d_V[(jj+1)*numel];
-		d_vj   = &d_V[(jj+2)*numel];
-
-		//
-		// Compute the displacement and check the step norm error
-		//
-
-		// Compute the tridiagonal square root on the host, and copy the result to the device
-		Brownian_Sqrt(
-				m,
-				alpha,
-				beta,
-				alpha_save,
-				beta_save,
-				W,
-				W1,
-				Tm,
-				d_Tm
-				);
-		
-		// Multiply basis vectors by Tm -- velocity = Vm * Tm
-		Brownian_NearField_LanczosMatrixMultiply_kernel<<<grid,threads>>>( &d_V[numel], d_Tm, d_FBnf, group_size, numel, m );
-
-		//
-		// Compute step norm error
-		//
-		scale = -1.0;
-		cublasSaxpy( blasHandle, numel, &scale, d_FBnf, 1, d_FBnf_old, 1 );
-		cublasSnrm2( blasHandle, numel, d_FBnf_old, 1, &stepnorm );
-		
-		float fbnorm = 0.0;
-		cublasSnrm2( blasHandle, numel, d_FBnf, 1, &fbnorm );
-		stepnorm /= fbnorm;
-
-		// Copy velocity
-		cudaMemcpy( d_FBnf_old, d_FBnf, numel*sizeof(Scalar), cudaMemcpyDeviceToDevice );
-
-		// Restore alpha, beta
-		for ( int ii = 0; ii < m; ++ii ){
-			alpha[ii] = alpha_save[ii];
-			beta[ii] = beta_save[ii];
-		}
-		beta[m] = beta_save[m];
-
-	}
-
-	// Save the number of required iterations
-	bro_data->m_Lanczos_nf = m;
- 
-	// Undo the preconditioning so that the result has the proper variance
-	// 
-	// operates in place
-	Precondition_Brownian_Undo(	
-					d_FBnf,       // input/output
-					group_size,
-					ker_data,
-					res_data
-					);
-	
-	// Rescale by original norm of Psi
-	cublasSscal( blasHandle, numel, &psinorm, d_FBnf, 1 );	
- 
-	// Free the memory and clear pointers
-	d_v = NULL;
-	d_V = NULL;
-	d_Tm = NULL;
-	d_FBnf_old = NULL;
-
-	d_vj   = NULL;
-	d_vjm1 = NULL;
-
-	free(alpha);
-	free(beta);
-	free(alpha_save);
-	free(beta_save);
-
-	free(W);
-	free(W1);
-	free(Tm);
+  
+  // Clean up
+  free(h_alpha);
+  free(h_alpha1);
+  free(h_beta);
+  free(h_beta1);
 		
 }
 
@@ -447,44 +424,39 @@ void Brownian_NearField_Force(Scalar *d_FBnf, // output
 
 
   // Initialize vectors
-  float *d_Psi_nf = (work_data->bro_nf_psi);
+  float *d_Psi_nf = work_data->bro_nf_psi;
 
-  //zhoge//// Generate the random vectors on each particle
-  //zhoge//Brownian_NearField_RNG_kernel<<<grid,threads>>>( 
-  //zhoge//						  d_Psi_nf,  //output
-  //zhoge//						  group_size,
-  //zhoge//						  bro_data->seed_nf,
-  //zhoge//						  bro_data->T,
-  //zhoge//						  dt);
-
+  //// Generate the random vectors on each particle
+  //Brownian_NearField_RNG_kernel<<<grid,threads>>>( 
+  //						  d_Psi_nf,  //output
+  //						  group_size,
+  //						  bro_data->seed_nf,
+  //						  bro_data->T,
+  //						  dt);
   
   //zhoge: use cuRand to generate Gaussian variables
   curandGenerator_t gen;
   unsigned int N_random = 6*group_size;                           //6 because force (3) and torque (3)
   float std_bro = sqrtf( 2.0 * bro_data->T / dt );                //standard deviation of the Brownian force
-  //curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_DEFAULT);         //default generator (xorwow)
-  curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_PHILOX4_32_10);   //fastest      
+  curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_PHILOX4_32_10);   //fastest generator
   curandSetPseudoRandomGeneratorSeed(gen, bro_data->seed_nf);     //set the seed (different from the ff)
   curandGenerateNormal(gen, d_Psi_nf, N_random, 0.0f, std_bro);   //mean 0, std as specified
   curandDestroyGenerator(gen);  
-
-
   
-		
-  // Apply the Lanczos method
-  Brownian_NearField_Lanczos( 	
-			     d_FBnf,   // output
-			     d_Psi_nf, // input
-			     d_pos,
-			     d_group_members,
-			     group_size,
-			     box,
-			     dt,
-			     pBuffer,
-			     ker_data,
-			     bro_data,
-			     res_data,
-			     work_data);
+  
+  // Apply the Chow & Saad method to sample the near-field force
+  Brownian_NearField_Chow_Saad( d_FBnf,   //output
+			        d_Psi_nf, //input
+			        d_pos,
+			        d_group_members,
+			        group_size,
+			        box,
+			        //dt,
+			        pBuffer,
+			        ker_data,
+			        bro_data,
+			        res_data,
+			        work_data);
 		
   // Clean Up
   d_Psi_nf = NULL;

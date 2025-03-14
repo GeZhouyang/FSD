@@ -9,7 +9,7 @@
 using namespace std;
 
 #include "Stokes.h"
-#include "Stokes.cuh"
+#include "Stokes.cuh"  //zhoge: This includes HOOMDMath.h, which includes cmath
 
 #include "DataStruct.h"
 
@@ -17,6 +17,7 @@ using namespace std;
 #include <iomanip>
 #include <iostream>
 #include <string>
+#include <random>
 
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
@@ -52,7 +53,9 @@ Stokes::Stokes(std::shared_ptr<SystemDefinition> sysdef,
 	       Scalar error,
 	       std::string fileprefix,
 	       int period,
-	       Scalar ndsr, Scalar kappa, Scalar k_n, Scalar beta_AF, Scalar epsq)
+	       Scalar ndsr, Scalar kappa, Scalar k_n, Scalar beta_AF, Scalar epsq, Scalar sqm_B1, Scalar sqm_B2,
+	       unsigned int N_mix, Scalar coef_B1_mask, Scalar coef_B2_mask,
+	       Scalar rot_diff, Scalar T_ext, Scalar omega_ext)
   : IntegrationMethodTwoStep(sysdef, group),
     m_T(T),
     m_seed(seed),
@@ -61,7 +64,9 @@ Stokes::Stokes(std::shared_ptr<SystemDefinition> sysdef,
     m_error(error),
     m_fileprefix(fileprefix),
     m_period(period),
-    m_ndsr(ndsr), m_kappa(kappa), m_k_n(k_n), m_beta(beta_AF), m_epsq(epsq)  //zhoge
+    m_ndsr(ndsr), m_kappa(kappa), m_k_n(k_n), m_beta(beta_AF), m_epsq(epsq), m_sqm_B1(sqm_B1),m_sqm_B2(sqm_B2),
+    m_N_mix(N_mix), m_coef_B1_mask(coef_B1_mask),m_coef_B2_mask(coef_B2_mask),
+    m_rot_diff(rot_diff), m_T_ext(T_ext),m_omega_ext(omega_ext)  //zhoge
     {
 	m_exec_conf->msg->notice(5) << "Constructing Stokes" << endl;
 
@@ -676,11 +681,17 @@ void Stokes::setParams()
 	// Particle linear/angular velocities, plus stresslet
 	unsigned int group_size = m_group->getNumMembers();
 
-	GPUArray<float> n_AppliedForce( 6*group_size, m_exec_conf);
-	GPUArray<float> n_Velocity( 11*group_size, m_exec_conf);
+	GPUArray<float> n_AppliedForce(6*group_size, m_exec_conf);
+	GPUArray<float> n_Velocity(   11*group_size, m_exec_conf);
+	GPUArray<float> n_sqm_B1_mask(   group_size, m_exec_conf);
+	GPUArray<float> n_sqm_B2_mask(   group_size, m_exec_conf);
+	GPUArray<Scalar3> n_noise_ang(   group_size, m_exec_conf);
  
 	m_AppliedForce.swap(n_AppliedForce);
 	m_Velocity.swap(n_Velocity);
+	m_sqm_B1_mask.swap(n_sqm_B1_mask);
+	m_sqm_B2_mask.swap(n_sqm_B2_mask);
+	m_noise_ang.swap(n_noise_ang);
 
 }
 
@@ -716,10 +727,10 @@ void Stokes::OutputData( unsigned int timestep, BoxDim box, Scalar current_shear
   }
 
   // Access needed data from CPU
-  ArrayHandle<float> h_Velocity(m_Velocity, access_location::host, access_mode::read);
-  
-  ArrayHandle<Scalar4> h_pos(      m_pdata->getPositions(), access_location::host, access_mode::read);
-  ArrayHandle<Scalar4> h_net_force(m_pdata->getNetForce(),  access_location::host, access_mode::read);
+  ArrayHandle<Scalar4> h_pos(    m_pdata->getPositions(), access_location::host, access_mode::read);
+  ArrayHandle<Scalar3> h_ori(m_pdata->getAccelerations(), access_location::host, access_mode::read);
+  ArrayHandle<float>   h_Velocity(m_Velocity,             access_location::host, access_mode::read);
+  ArrayHandle<Scalar4> h_pos_gb(m_pdata->getVelocities(), access_location::host, access_mode::read);
 
   ArrayHandle<unsigned int> h_index_array(   m_group->getIndexArray(),        access_location::host, access_mode::read);
   ArrayHandle<unsigned int> h_tag_array(     m_pdata->getTags(),              access_location::host, access_mode::read);
@@ -732,56 +743,76 @@ void Stokes::OutputData( unsigned int timestep, BoxDim box, Scalar current_shear
   timestep_str << std::setw(10) << std::setfill('0') << timestep;
 
   // Construct the filenames
-  //std::string filename0 = m_fileprefix + "." + timestep_str.str() + ".txt";
   std::string filename0 = "raw/stresslet." + timestep_str.str() + ".txt";
   std::string filename1 = "raw/position." + timestep_str.str() + ".txt";
   std::string filename2 = "overlap.txt";
   std::string filename3 = "raw/interparticle_stresslet." + timestep_str.str() + ".txt";
-  //std::string filename4 = "stresslet_repl.txt";
+  std::string filename4 = "raw/velocity." + timestep_str.str() + ".txt";
   
   // Open the files
   FILE * file0;
   FILE * file1;
   FILE * file2;
   FILE * file3;
-  //FILE * file4;
+  FILE * file4;
 	
   file0 = fopen(filename0.c_str(), "w");	
   file1 = fopen(filename1.c_str(), "w");
   file2 = fopen(filename2.c_str(), "a");
   file3 = fopen(filename3.c_str(), "w");
-  //file4 = fopen(filename4.c_str(), "a");
+  file4 = fopen(filename4.c_str(), "w");
   
   // init post-process results
   Scalar max_overlap = 0.0;
   Scalar avr_overlap = 0.0;
   float  cnt_overlap = 0.0;
   float  min_gap     = 10.0;
+
+  float velx,vely,velz,omgx,omgy,omgz;
     
   // Loop through particle indices/tags and write per-particle result to file
   for (unsigned int ii = 0; ii < N; ii++) {
 
     // Get the particle's global index in data arrays (idx) and ID (tag)
     unsigned int idx = h_index_array.data[ii];
-    unsigned int tag = h_tag_array.data[idx];  
-    
-    // Access stresslet, position and (net) interparticle force of each particle
-    float * stlt = & h_Velocity.data[ 6*N + 5*idx ];
+    unsigned int tag = h_tag_array.data[idx];
+
+    // position and orientation
     Scalar4 pos4 = h_pos.data[idx];
+    Scalar3 ori  = h_ori.data[idx];
+    Scalar4 pos5 = h_pos_gb.data[idx];
+  
+    // velocity
+    float * vel_p = & h_Velocity.data[ 6*idx ];  
+    velx = vel_p[0];
+    vely = vel_p[1];
+    velz = vel_p[2];
+    omgx = vel_p[3];
+    omgy = vel_p[4];
+    omgz = vel_p[5];
+    
+    // stresslet
+    float * stlt = & h_Velocity.data[ 6*N + 5*idx ];
     
     float stress_xx = nden * stlt[0];
     float stress_xy = nden * stlt[1];
     float stress_xz = nden * stlt[2];
-    float stress_yz = nden * stlt[3];  //zhoge: should be yz
+    float stress_yz = nden * stlt[3];  //zhoge: Note, this is yz, not yy.
     float stress_yy = nden * stlt[4];
     float stress_zz = -stress_xx-stress_yy;  //By definition, stlt is traceless.    
+
     
     // Output the hydrodynamic stresslets	
     fprintf (file0, "%7i %12.3e %12.3e %12.3e %12.3e %12.3e %12.3e \n", tag,
-	     stress_xx, stress_xy, stress_xz, stress_yy, stress_yz, stress_zz);
+    	     stress_xx, stress_xy, stress_xz, stress_yy, stress_yz, stress_zz);
 
-    // Output the position
-    fprintf (file1, "%7i %15.6e %15.6e %15.6e \n", tag, pos4.x, pos4.y, pos4.z);
+    // Output the position and orientation
+    fprintf (file1, "%7i %15.6e %15.6e %15.6e %12.3e %12.3e %12.3e %15.6e %15.6e %15.6e \n",
+	     tag, pos4.x, pos4.y, pos4.z, ori.x, ori.y, ori.z, pos5.x, pos5.y, pos5.z);
+
+    // Output the translational and angular velocities
+    fprintf (file4, "%7i %15.6e %15.6e %15.6e %12.3e %12.3e %12.3e \n",
+	     tag, velx, vely, velz, omgx, omgy, omgz);
     
     float stress_repl_xx = 0.0;
     float stress_repl_xy = 0.0;
@@ -793,7 +824,8 @@ void Stokes::OutputData( unsigned int timestep, BoxDim box, Scalar current_shear
     // Neighborlist arrays
     unsigned int head_idx = h_headlist_ewald.data[ idx ]; // Location in head array for neighbors of current particle
     unsigned int n_neigh  = h_nneigh_ewald.data[ idx ];   // Number of neighbors of the nearest particle
-		
+
+    
     for (unsigned int neigh_idx = 0; neigh_idx < n_neigh; neigh_idx++) {
 
       // Get the current neighbor index
@@ -836,18 +868,18 @@ void Stokes::OutputData( unsigned int timestep, BoxDim box, Scalar current_shear
       // Compute stress tensor contribution from interparticle forces
       //
       if (dist <= 2.0 + 10.0/m_kappa) {
-	
-	float normalx = R.x/dist;  //from center to neighbor
-	float normaly = R.y/dist;  //from center to neighbor
-	float normalz = R.z/dist;  //from center to neighbor
-
-	float rmax = 2.0 + 1.0*sqrt(epsq);  //Below rmax, collision force is activated to model surface roughness.
-	float gap1 = dist - rmax;  //surface gap for interparticle force calculations
-	
-	if (gap1 >= 0.) {
-	  
-	  float F_app_mag = -F_0 * exp (-gap1*m_kappa);  //electrostatic repulsion, negative
-	  F_app_mag += Hamaker/(12.*(gap1*gap1 + epsq));  //van der Waals attraction, positive
+      	
+      	float normalx = R.x/dist;  //from center to neighbor
+      	float normaly = R.y/dist;  //from center to neighbor
+      	float normalz = R.z/dist;  //from center to neighbor
+      
+      	float rmax = 2.0 + 1.0*sqrt(epsq);  //Below rmax, collision force is activated to model surface roughness.
+      	float gap1 = dist - rmax;  //surface gap for interparticle force calculations
+      	
+      	if (gap1 >= 0.) {
+      	  
+      	  float F_app_mag = -F_0 * expf (-gap1*m_kappa);  //electrostatic repulsion, negative
+      	  F_app_mag += Hamaker/(12.*(gap1*gap1 + epsq));  //van der Waals attraction, positive
       	  //float F_app_mag = F_0/r_c*exp( -(dist-2.0)/r_c )/(1.0-exp( -(dist-2.0)/r_c ));  //always positive  //brady
       	  
       	  stress_repl_xx += nden * (F_app_mag * normalx * R.x)/2.0;  //divide by 2 because pair  
@@ -857,8 +889,8 @@ void Stokes::OutputData( unsigned int timestep, BoxDim box, Scalar current_shear
       	  stress_repl_yz += nden * (F_app_mag * normaly * R.z)/2.0;  
       	  stress_repl_zz += nden * (F_app_mag * normalz * R.z)/2.0;  
       	}
-	else {
-
+      	else {
+      
       	  float F_app_mag = Hamaker/(12.*epsq) - F_0 - m_k_n * abs(gap1); //net force at gap1=0 minus collision
       
       	  stress_repl_xx += nden * (F_app_mag * normalx * R.x)/2.0;  //divide by 2 because pair
@@ -867,16 +899,16 @@ void Stokes::OutputData( unsigned int timestep, BoxDim box, Scalar current_shear
       	  stress_repl_yy += nden * (F_app_mag * normaly * R.y)/2.0;  
       	  stress_repl_yz += nden * (F_app_mag * normaly * R.z)/2.0;  
       	  stress_repl_zz += nden * (F_app_mag * normalz * R.z)/2.0;
-	  
+      	  
       	}
-	
+      	
       } //interparticle
       
     } //neighbor particle
 
     // Output the interparticle stresslets	
     fprintf (file3, "%7i %12.3e %12.3e %12.3e %12.3e %12.3e %12.3e \n", tag,
-	     stress_repl_xx, stress_repl_xy, stress_repl_xz, stress_repl_yy, stress_repl_yz, stress_repl_zz);
+    	     stress_repl_xx, stress_repl_xy, stress_repl_xz, stress_repl_yy, stress_repl_yz, stress_repl_zz);
 
   } //center particle
   
@@ -887,30 +919,14 @@ void Stokes::OutputData( unsigned int timestep, BoxDim box, Scalar current_shear
     }			    
   // Output overlap stats
   fprintf (file2, "%9i %8.0f %12.3e %12.3e  %12.3e \n", timestep, cnt_overlap, max_overlap, avr_overlap, min_gap);
-
-  //// Output stresslet due to applied forces
-  //fprintf (file3, "%9i %13.5e %13.5e %13.5e %13.5e %13.5e %13.5e \n", timestep,
-  //	   stress_coll_xx,
-  //	   stress_coll_xy,
-  //	   stress_coll_xz,
-  //	   stress_coll_yy,
-  //	   stress_coll_yz,
-  //	   stress_coll_zz);
-
-  //fprintf (file4, "%9i %13.5e %13.5e %13.5e %13.5e %13.5e %13.5e \n", timestep,
-  //	   stress_repl_xx,
-  //	   stress_repl_xy,
-  //	   stress_repl_xz,
-  //	   stress_repl_yy,
-  //	   stress_repl_yz,
-  //	   stress_repl_zz);
+  
   
   // Close output files
   fclose (file0);
   fclose (file1);
   fclose (file2);
   fclose (file3);
-  //fclose (file4);
+  fclose (file4);
 		
 }
 
@@ -946,7 +962,7 @@ void Stokes::AllocateWorkSpaces(){
 	//	bro_nf_v		6*N		float
 	//	bro_nf_V		(mmax+1)*6*N	float
 	//	bro_nf_FB_old 		6*N	 	float
-	//	bro_nf_Psi 		6*N		float
+	//	bro_nf_psi 		6*N		float
 	//	saddle_psi		6*N		float
 	//	saddle_posPrime		N		float4
 	//	saddle_rhs 		17*N		float
@@ -993,31 +1009,36 @@ void Stokes::AllocateWorkSpaces(){
 
 	// Maximum number of non-zero enries
 	int nnz = m_nnz;
-
+	
 	// Dot product partial sum
 	cudaMalloc( (void**)&dot_sum, grid_for_dot*sizeof(Scalar) );
 
-	// Variables for far-field Lanczos iteration	
+	//zhoge: 11N for the real space noise, 6NxNyNz for the wave sapce noise
+	cudaMalloc( (void**)&m_work_bro_gauss,		(11*group_size + 6*m_Nx*m_Ny*m_Nz) * sizeof(float) );  
+
+	// Variables for far-field Lanczos iteration
 	cudaMalloc( (void**)&m_work_bro_ff_psi,		3*group_size * sizeof(Scalar4) );
-	//zhoge: Gaussian variables for Brownian calculations
-	cudaMalloc( (void**)&m_work_bro_gauss,		(12*group_size + 6*m_Nx*m_Ny*m_Nz) * sizeof(float) );
-	
 	cudaMalloc( (void**)&m_work_bro_ff_UBreal,	3*group_size * sizeof(Scalar4) );
-	cudaMalloc( (void**)&m_work_bro_ff_Tm,		m_max * sizeof(Scalar) );
-	cudaMalloc( (void**)&m_work_bro_ff_v,		3*group_size*sizeof(Scalar4) );
-	cudaMalloc( (void**)&m_work_bro_ff_vj,		3*group_size*sizeof(Scalar4) );
-	cudaMalloc( (void**)&m_work_bro_ff_vjm1, 	3*group_size*sizeof(Scalar4) );
-	cudaMalloc( (void**)&m_work_bro_ff_Mvj, 	3*group_size*sizeof(Scalar4) );
-	cudaMalloc( (void**)&m_work_bro_ff_V,		m_max*3*group_size * sizeof(Scalar4) );
-	cudaMalloc( (void**)&m_work_bro_ff_UB_old,	3*group_size*sizeof(Scalar4) );
-	cudaMalloc( (void**)&m_work_bro_ff_Mpsi, 	3*group_size*sizeof(Scalar4) );
+	cudaMalloc( (void**)&m_work_bro_ff_Mpsi, 	3*group_size * sizeof(Scalar4) );
+	//zhoge: change to simple float/Scalar for the far-field Chow & Saad
+	cudaMalloc( (void**)&m_work_bro_ff_V1,		(m_max+1) * 11 * group_size * sizeof(Scalar) );
+	cudaMalloc( (void**)&m_work_bro_ff_UB_new1,	            11 * group_size * sizeof(Scalar) );
+	cudaMalloc( (void**)&m_work_bro_ff_UB_old1,	            11 * group_size * sizeof(Scalar) );
+
+	//zhoge: RFD storage (Brownian drift)
+	cudaMalloc( (void**)&m_work_rfd_rhs, 17*group_size*sizeof(float) );
+	cudaMalloc( (void**)&m_work_rfd_sol, 17*group_size*sizeof(float) );
+
+	//zhoge: RK2 midstep storage
+	cudaMalloc( (void**)&m_work_pos_rk1, group_size*sizeof(Scalar4) );
+	cudaMalloc( (void**)&m_work_ori_rk1, group_size*sizeof(Scalar3) );
+
 
 	// Variables for near-field Lanczos iteration	
 	cudaMalloc( (void**)&m_work_bro_nf_Tm,		m_max * sizeof(Scalar) );
-	cudaMalloc( (void**)&m_work_bro_nf_v,		6*group_size * sizeof(Scalar) );
 	cudaMalloc( (void**)&m_work_bro_nf_V,		(m_max+1) * 6*group_size * sizeof(Scalar) );
 	cudaMalloc( (void**)&m_work_bro_nf_FB_old, 	6*group_size * sizeof(Scalar) );
-	cudaMalloc( (void**)&m_work_bro_nf_Psi, 	6*group_size*sizeof(float) );
+	cudaMalloc( (void**)&m_work_bro_nf_psi, 	6*group_size*sizeof(float) );
 
 	cudaMalloc( (void**)&m_work_saddle_psi,		6*group_size*sizeof(float) );
 	cudaMalloc( (void**)&m_work_saddle_posPrime,	group_size*sizeof(Scalar4) );
@@ -1049,26 +1070,29 @@ void Stokes::FreeWorkSpaces(){
 	
 	// Dot product partial sum
 	cudaFree( dot_sum );
+	cudaFree( m_work_bro_gauss );  //zhoge
 
 	// Variables for far-field Lanczos iteration	
 	cudaFree( m_work_bro_ff_psi );
-	cudaFree( m_work_bro_gauss );  //zhoge
 	cudaFree( m_work_bro_ff_UBreal );
-	cudaFree( m_work_bro_ff_Tm );
-	cudaFree( m_work_bro_ff_v );
-	cudaFree( m_work_bro_ff_vj );
-	cudaFree( m_work_bro_ff_vjm1 );
-	cudaFree( m_work_bro_ff_Mvj );
-	cudaFree( m_work_bro_ff_V );
-	cudaFree( m_work_bro_ff_UB_old );
 	cudaFree( m_work_bro_ff_Mpsi );
+	//zhoge
+	cudaFree( m_work_bro_ff_V1 );
+	cudaFree( m_work_bro_ff_UB_new1 );
+	cudaFree( m_work_bro_ff_UB_old1 );
+
+	cudaFree( m_work_rfd_rhs );
+	cudaFree( m_work_rfd_sol );
+
+	cudaFree( m_work_pos_rk1 );
+	cudaFree( m_work_ori_rk1 );
+
 
 	// Variables for near-field Lanczos iteration	
 	cudaFree( m_work_bro_nf_Tm );
-	cudaFree( m_work_bro_nf_v );
 	cudaFree( m_work_bro_nf_V );
 	cudaFree( m_work_bro_nf_FB_old );
-	cudaFree( m_work_bro_nf_Psi );
+	cudaFree( m_work_bro_nf_psi );
 
 	cudaFree( m_work_saddle_psi );
 	cudaFree( m_work_saddle_posPrime );
@@ -1166,301 +1190,495 @@ void Stokes::setFriction( std::string friction_type,
 
 }
 
-/*! 
-	Run the integration method.
-
-	Particle positions and velocities are moved forward to timestep+1 
+/* 
+  Run the integration method.
+  Particle positions and velocities are moved forward to timestep+1 
 */
 void Stokes::integrateStepOne(unsigned int timestep)
 {
 
-	// profile this step
-	if (m_prof)
-	  m_prof->push(m_exec_conf, "Stokes step 1 (no step 2)");
+  // profile this step
+  if (m_prof)
+    m_prof->push(m_exec_conf, "Stokes step 1 (no step 2)");
   
-	// ********************************************************************
-	// Get Handles to Device Arrays
-	// ********************************************************************
-
-	// Recompute neighbor lists ( if needed )	
-	m_nlist_ewald->compute(timestep);
+  // Consistency check
+  unsigned int group_size = m_group->getNumMembers();
+  assert(group_size <= m_pdata->getN());
+  if (group_size == 0)
+    return;
 	
-	// Access the neighbor lists
-	ArrayHandle<unsigned int> d_nneigh_ewald(   m_nlist_ewald->getNNeighArray(), access_location::device, access_mode::read );
-	ArrayHandle<unsigned int> d_nlist_ewald(    m_nlist_ewald->getNListArray(),  access_location::device, access_mode::read );
-	ArrayHandle<unsigned int> d_headlist_ewald( m_nlist_ewald->getHeadList(),    access_location::device, access_mode::read );
+  BoxDim box = m_pdata->getBox();
+
+  // Calculate the shear rate of the current timestep
+  Scalar current_shear_rate = m_shear_func -> getShearRate(timestep);
+
+  // Recompute neighbor lists ( if needed )	
+  m_nlist_ewald->compute(timestep);
+
+  
+  // ****************
+  // Initializations
+  // ****************
+  
+  
+  // Initialize particle (global) position and orientation on host
+  std::random_device rd {};
+  std::mt19937 gen {rd()};
+
+  float randx,randy,randz;
+
+  if (timestep == 0)
+    {
+      std::normal_distribution<float> gaussian {0.0, 1.0}; // mean=0, std=1	    
+
+      ArrayHandle<Scalar4> h_pos0(    m_pdata->getPositions(), access_location::host, access_mode::readwrite); //may re-init
+      ArrayHandle<Scalar3> h_ori0(m_pdata->getAccelerations(), access_location::host, access_mode::overwrite); //init orientation
+      ArrayHandle<Scalar4> h_pos_gb0(m_pdata->getVelocities(), access_location::host, access_mode::overwrite); //init global pos
+
+      
+      //// read position and orientation from a file (if restart)
+      //ifstream last_pos;
+      //last_pos.open("restart_last.txt");
+      //if(last_pos.fail()) // checks if file opended 
+      //	{ 
+      //	  printf("ERROR: Couldn't find the restart file.\n"); 
+      //	  exit(1); 
+      //	}
+      //printf("Read position and orientation from `restart_last.txt`.\n");
+      //unsigned int tag;
+      //float posx,posy,posz, orix,oriy,oriz, pos_gbx,pos_gby,pos_gbz;
+
+      
+      for (unsigned int i=0; i<group_size; i++){
 	
-	// Pruned neighbor list for lubrication preconditioner
-	// This list is constructed in Precondition_Wrap(). (zhoge: overwrite??)
-	ArrayHandle<unsigned int> d_nneigh_pruned(   m_nneigh_pruned,   access_location::device, access_mode::readwrite );
-	ArrayHandle<unsigned int> d_nlist_pruned(    m_nlist_pruned,    access_location::device, access_mode::readwrite );
-	ArrayHandle<unsigned int> d_headlist_pruned( m_headlist_pruned, access_location::device, access_mode::readwrite );
+	// orientation uniformly distributed on a sphere
+	randx = gaussian(gen);
+	randy = gaussian(gen);
+	randz = gaussian(gen);
+	float randmag = sqrtf(randx*randx + randy*randy + randz*randz);
+	h_ori0.data[i] = make_scalar3(randx/randmag, randy/randmag, randz/randmag);
 
-	// Consistency check
-	unsigned int group_size = m_group->getNumMembers();
-	assert(group_size <= m_pdata->getN());
-	if (group_size == 0)
-		return;
+	// orientation all aligned
+	//h_ori0.data[i] = make_scalar3(1.,0.,0.);  
+	//h_ori0.data[i] = make_scalar3(0.,1.,0.); 
+	//h_ori0.data[i] = make_scalar3(0.,0.,1.);
 
-	// Access HOOMD intrinsic data
-	ArrayHandle<Scalar4> d_net_force( m_pdata->getNetForce(), access_location::device, access_mode::read );
-	ArrayHandle<Scalar4> d_pos(      m_pdata->getPositions(), access_location::device, access_mode::readwrite ); //GPUdebug
-	ArrayHandle<Scalar4> d_vel(     m_pdata->getVelocities(), access_location::device, access_mode::readwrite ); //GPUdebug
-	ArrayHandle<int3>    d_image(       m_pdata->getImages(), access_location::device, access_mode::readwrite ); //GPUdebug
+	//// restart from the last time (tag may change, so be careful when postprocessing)
+	////last_pos >> tag >> posx >> posy >> posz >> orix >> oriy >> oriz;
+	//last_pos >> tag >> posx >> posy >> posz >> orix >> oriy >> oriz >> pos_gbx >> pos_gby >> pos_gbz;
+	//h_pos0.data[i]    = make_scalar4(posx,    posy,    posz,    0.0);
+	//h_ori0.data[i]    = make_scalar3(orix,    oriy,    oriz        );
+	//h_pos_gb0.data[i] = make_scalar4(pos_gbx, pos_gby, pos_gbz, 0.0);
 
-	BoxDim box = m_pdata->getBox();
-	ArrayHandle<unsigned int> d_index_array(m_group->getIndexArray(), access_location::device, access_mode::read);       
-	//// tag is fixed (below). However, in Helper_Saddle.cu, Andrew used idx instead of d_group_member,
-	//// so we shouldn't use tag unless those are changed.
-	//ArrayHandle<unsigned int> d_index_array(m_pdata->getTags(), access_location::host, access_mode::read);
+	// initialize global position from local position (start from scratch or if last pos_gb unavail)
+	h_pos_gb0.data[i] = h_pos0.data[i];
 	
-	// Grid vectors
-	ArrayHandle<Scalar4>      d_gridk(m_gridk, access_location::device, access_mode::readwrite); //write if deform
-	ArrayHandle<CUFFTCOMPLEX> d_gridX(m_gridX, access_location::device, access_mode::read); //GPUdebug
-	ArrayHandle<CUFFTCOMPLEX> d_gridY(m_gridY, access_location::device, access_mode::read); //GPUdebug
-	ArrayHandle<CUFFTCOMPLEX> d_gridZ(m_gridZ, access_location::device, access_mode::read); //GPUdebug
+      }
+      ////mouad swim3
+      //h_ori0.data[2] = make_scalar3(0.05,sqrtf(1.-2.*0.05*0.05),0.05);  
+      //h_ori0.data[1] = make_scalar3(7./8., sqrtf(1.-49./64.), 0.);  
+      //h_ori0.data[0] = make_scalar3(9.987e-01, 0., 0.05);  
+      //h_ori0.data[1] = make_scalar3(9.987e-01, 0.05, 0.);  
+      //h_ori0.data[0] = make_scalar3(1., 0., 0.);
+
+    }
+
 	
-	ArrayHandle<CUFFTCOMPLEX> d_gridXX(m_gridXX, access_location::device, access_mode::read); //GPUdebug
-	ArrayHandle<CUFFTCOMPLEX> d_gridXY(m_gridXY, access_location::device, access_mode::read); //GPUdebug
-	ArrayHandle<CUFFTCOMPLEX> d_gridXZ(m_gridXZ, access_location::device, access_mode::read); //GPUdebug
-	ArrayHandle<CUFFTCOMPLEX> d_gridYX(m_gridYX, access_location::device, access_mode::read); //GPUdebug
-	ArrayHandle<CUFFTCOMPLEX> d_gridYY(m_gridYY, access_location::device, access_mode::read); //GPUdebug
-	ArrayHandle<CUFFTCOMPLEX> d_gridYZ(m_gridYZ, access_location::device, access_mode::read); //GPUdebug
-	ArrayHandle<CUFFTCOMPLEX> d_gridZX(m_gridZX, access_location::device, access_mode::read); //GPUdebug
-	ArrayHandle<CUFFTCOMPLEX> d_gridZY(m_gridZY, access_location::device, access_mode::read); //GPUdebug
+  //// Generate a list (3N) of random variables for the rotational diffusion (noise)
+  //// from an identical and independent Gaussian distribution
+  ArrayHandle<Scalar3> h_noise_ang(m_noise_ang, access_location::host, access_mode::overwrite);
 
-	// Linear/angular velocities and applied force/torque
-	ArrayHandle<float> d_AppliedForce(m_AppliedForce, access_location::device, access_mode::overwrite); //GPUdebug
-	ArrayHandle<float> d_Velocity(    m_Velocity,     access_location::device, access_mode::overwrite); //GPUdebug
-
-	// Real space interaction tabulation
-	ArrayHandle<Scalar4> d_ewaldC1(m_ewaldC1, access_location::device, access_mode::read);
-
-	// Lubrication calculation stuff
-	ArrayHandle<int>   d_L_RowInd( m_L_RowInd, access_location::device, access_mode::overwrite ); //GPUdebug
-	ArrayHandle<int>   d_L_RowPtr( m_L_RowPtr, access_location::device, access_mode::overwrite ); //GPUdebug
-	ArrayHandle<int>   d_L_ColInd( m_L_ColInd, access_location::device, access_mode::overwrite ); //GPUdebug
-	ArrayHandle<float> d_L_Val(    m_L_Val,    access_location::device, access_mode::overwrite ); //GPUdebug	
-	ArrayHandle<float> d_Diag(     m_Diag,     access_location::device, access_mode::overwrite ); //GPUdebug
-	ArrayHandle<int>   d_HasNeigh( m_HasNeigh, access_location::device, access_mode::overwrite ); //GPUdebug
+  float noise_mean, noise_stdd;
+  noise_mean = 0.0;
+  noise_stdd = sqrtf(2.0*m_rot_diff/m_deltaT);  // divide by dt because it is a velocity
 	
-	ArrayHandle<float> d_ResTable_dist( m_ResTable_dist, access_location::device, access_mode::read );
-	ArrayHandle<float> d_ResTable_vals( m_ResTable_vals, access_location::device, access_mode::read );
+  std::normal_distribution<float> noise {noise_mean, noise_stdd};
 	
-	ArrayHandle<unsigned int> d_nneigh_less( m_nneigh_less, access_location::device, access_mode::overwrite ); //GPUdebug	
-	ArrayHandle<unsigned int> d_NEPP(        m_NEPP,        access_location::device, access_mode::overwrite ); //GPUdebug	
-	ArrayHandle<unsigned int> d_offset(      m_offset,      access_location::device, access_mode::overwrite ); //GPUdebug	
+  for (unsigned int i=0; i<group_size; i++){
 
-	ArrayHandle<float> d_Scratch1( m_Scratch1, access_location::device, access_mode::overwrite ); //GPUdebug
-	ArrayHandle<float> d_Scratch2( m_Scratch2, access_location::device, access_mode::overwrite ); //GPUdebug
-	ArrayHandle<float> d_Scratch3( m_Scratch3, access_location::device, access_mode::overwrite ); //GPUdebug
-	ArrayHandle<int>   d_prcm(     m_prcm,     access_location::device, access_mode::overwrite ); //GPUdebug
+    randx = noise(gen);
+    randy = noise(gen);
+    randz = noise(gen);
 
-	// Randomize seeds for stochastic calculations
-	srand( m_seed + timestep );
-	m_seed_ff_rs = rand();
-	m_seed_ff_ws = rand();
-	m_seed_nf = rand();
-	m_seed_rfd = rand();
+    h_noise_ang.data[i] = make_scalar3(randx,randy,randz);
+  }
 
-	// Initialize values in the data structure for Brownian calculation
-	BrownianData bro_struct = {
-					m_error,
-					timestep,
-					m_seed_ff_rs,
-					m_seed_ff_ws,
-					m_seed_nf,
-					m_seed_rfd,
-					m_m_Lanczos_ff,
-					m_m_Lanczos_nf,
-					float(m_T->getValue(timestep)),
-					m_rfd_epsilon
-					};
-	BrownianData *bro_data = &bro_struct;
 
-	// Initialize values in the data structure for mobility calculations
-	MobilityData mob_struct = {
-					m_xi,
-					m_ewald_cut,
-					m_ewald_dr,
-					m_ewald_n,
-					d_ewaldC1.data,
-					m_self,
-					d_nneigh_ewald.data,
-					d_nlist_ewald.data,
-					d_headlist_ewald.data,
-					m_eta,
-					m_gaussP,
-					m_gridh,
-					d_gridk.data,
-					d_gridX.data,
-					d_gridY.data,
-					d_gridZ.data,
-					d_gridXX.data,
-					d_gridXY.data,
-					d_gridXZ.data,
-					d_gridYX.data,
-					d_gridYY.data,
-					d_gridYZ.data,
-					d_gridZX.data,
-					d_gridZY.data,
-					plan,
-					m_Nx,
-					m_Ny,
-					m_Nz
-					};
-	MobilityData *mob_data = &mob_struct;
-
-	// Initialize values in the data structure for the resistance calculations
-	//
-	// !!! The pointers to the neighbor list here are the EXACT SAME pointers
-	//     used mobility structure. Replicated here for simplicity because
-	//     it's only ever read, not modified. This way also leaves the option
-	//     open to add different neighbor list structures for the lubrication
-	//     and mobility calculations. 
-	ResistanceData res_struct = {
-				     4.0,  // lubrication cutoff, rlub 
-				     2.1,  // lubrication (preconditioner) cutoff, rp
-				     d_nneigh_ewald.data,
-				     d_nlist_ewald.data,
-				     d_headlist_ewald.data,
-				     d_nneigh_pruned.data,
-				     d_headlist_pruned.data,
-				     d_nlist_pruned.data,
-				     m_nnz,
-				     d_nneigh_less.data,
-				     d_NEPP.data,
-				     d_offset.data,
-				     d_L_RowInd.data,
-				     d_L_RowPtr.data,
-				     d_L_ColInd.data,
-				     d_L_Val.data,
-				     d_ResTable_dist.data,
-				     d_ResTable_vals.data,
-				     m_ResTable_min,
-				     m_ResTable_dr,
-				     soHandle,
-				     spHandle,
-				     spStatus,
-				     descr_R,
-				     descr_L,
-				     trans_L,
-				     trans_Lt,
-				     info_R,
-				     info_L,
-				     info_Lt,
-				     policy_R,
-				     policy_L,
-				     policy_Lt,
-				     m_pBufferSize,
-				     d_Scratch1.data,
-				     d_Scratch2.data,
-				     d_Scratch3.data,
-				     d_prcm.data,
-				     d_HasNeigh.data,
-				     d_Diag.data,
-				     m_ichol_relaxer,
-				     false,
-				     blasHandle,
-				     m_ndsr,    //non-dimensional shear rate
-				     m_k_n,     //collision spring const
-				     m_kappa,   //inverse Debye length for electrostatic repulsion
-				     m_beta,    //ratio of the Hamaker const and elst force scale
-				     m_epsq     //square of the vdw regularization
-	};
-	ResistanceData *res_data = &res_struct;
-
-	// Initialize values in workspace data
-	WorkData work_struct = {
-				dot_sum,
-				m_work_bro_ff_psi,
-				m_work_bro_gauss,  //zhoge: Gaussian random variables
-				m_work_bro_ff_UBreal,
-				m_work_bro_ff_Tm,
-				m_work_bro_ff_v,
-				m_work_bro_ff_vj,
-				m_work_bro_ff_vjm1,
-				m_work_bro_ff_Mvj,
-				m_work_bro_ff_V,
-				m_work_bro_ff_UB_old,
-				m_work_bro_ff_Mpsi,
-				m_work_bro_nf_Tm,
-				m_work_bro_nf_v,
-				m_work_bro_nf_V,
-				m_work_bro_nf_FB_old,
-				m_work_bro_nf_Psi,
-				m_work_saddle_psi,
-				m_work_saddle_posPrime,
-				m_work_saddle_rhs,
-				m_work_saddle_solution,
-				m_work_mob_couplet,
-				m_work_mob_delu,
-				m_work_mob_vel1,
-				m_work_mob_vel2,
-				m_work_mob_delu1,
-				m_work_mob_delu2,
-				m_work_mob_vel,
-				m_work_mob_AngvelStrain,
-				m_work_mob_net_force,
-				m_work_mob_TorqueStress,
-				m_work_precond_scratch,
-				m_work_precond_map,
-				m_work_precond_backup
-				};
-	WorkData *work_data = &work_struct;
-
-        // Calculate the shear rate of the current timestep
-        Scalar current_shear_rate = m_shear_func -> getShearRate(timestep);
-
-	// If the period is set, output every period timesteps (before updating)
-	if ( ( m_period > 0 ) && ( int(timestep) % m_period == 0 ) ) {
-	  OutputData(int(timestep), box, current_shear_rate);
-	}
+  // Initialize squirmer masks on the host, at every timestep (index to tag mapping may change)
+  ArrayHandle<unsigned int> h_index_array(m_group->getIndexArray(), access_location::host, access_mode::read);
+  ArrayHandle<unsigned int> h_tag_array(m_pdata->getTags(),         access_location::host, access_mode::read);
+  ArrayHandle<float>        h_sqm_B1_mask(m_sqm_B1_mask,            access_location::host, access_mode::overwrite); 
+  ArrayHandle<float>        h_sqm_B2_mask(m_sqm_B2_mask,            access_location::host, access_mode::overwrite);
 	
-	// ********************************************************************
-	// Perform the update on the GPU (in Stokes.cu))
-	// ********************************************************************
+  //// Only uncomment the following if testing ishikawa
+  //ArrayHandle<Scalar4>      h_pos(m_pdata->getPositions(), access_location::host, access_mode::overwrite); 	
+  //float r_ishi = 2.5 + float(timestep)*0.5;  //center-to-center distance 
+  //float theta_ishi = M_PI/4.;  //angular position of the passive particle from the axis of the active particle (0,1,0)
+	
+  for (unsigned int idx = 0; idx < group_size; idx++){
+    unsigned int i = h_index_array.data[idx]; // this is an identical mapping (i.e. redundant)
+    //// debug 2023-03-26
+    if (i != idx){
+      printf("particle index: %10i %10i\n", i, idx);
+      printf("i and idx don't match. Exit the program.\n");
+      exit(1);
+    }
+	  
+    if (h_tag_array.data[i] < m_N_mix)
+      {
+	h_sqm_B1_mask.data[i] = 1.0;  // unchanged
+	h_sqm_B2_mask.data[i] = 1.0;  // unchanged
+	      
+	//// Only uncomment the following if testing ishikawa
+	//h_pos.data[i] = {0.0, 0.0, 0.0, 0.0}; //active particle at the origin
+      }
+    else
+      {
+	h_sqm_B1_mask.data[i] = m_coef_B1_mask;  // masked
+	h_sqm_B2_mask.data[i] = m_coef_B2_mask;  // masked
 
-	Stokes_StepOne( timestep,
-			m_period,
-		        d_pos.data,            //input/output
-			d_net_force.data,      
-			d_vel.data,            //output: HOOMD velocity vector (Scalar4)
-			d_AppliedForce.data,   //input/output
-			d_Velocity.data,       //input/output: FSD velocity and stresslet (11N)
-                        m_deltaT,              
-			m_error,	       
-			current_shear_rate,    
-                        16,                   //cuda block size (16 is faster)
-			d_image.data,	       
-                        d_index_array.data,    
-                        group_size,	       
-                        box,		       
-			bro_data,	       
-			mob_data,	       
-			res_data,	       
-			work_data
-			);
+	//// Only uncomment the following if testing ishikawa
+	//h_pos.data[i] = {0.,              r_ishi,          0.0, 0.0}; // 0 deg in the xy plane
+	//h_pos.data[i] = {r_ishi/sqrt(2.), r_ishi/sqrt(2.), 0.0, 0.0}; //45 deg in the xy plane
+	//h_pos.data[i] = {r_ishi*sin(theta_ishi), r_ishi*cos(theta_ishi), 0.0, 0.0}; //note the difference from conventions
+	
+      }
+  } //for loop
+
+  
+  // Initial output (before updating)
+  if ( ( m_period > 0 ) && ( int(timestep) == 0 ) ) {  
+    OutputData(int(timestep), box, current_shear_rate);
+  }
+
+  
+  // *****************************
+  // Get Handles to Device Arrays
+  // *****************************
+
+  
+  // Neighbor lists
+  ArrayHandle<unsigned int> d_nneigh_ewald(   m_nlist_ewald->getNNeighArray(), access_location::device, access_mode::read );
+  ArrayHandle<unsigned int> d_nlist_ewald(    m_nlist_ewald->getNListArray(),  access_location::device, access_mode::read );
+  ArrayHandle<unsigned int> d_headlist_ewald( m_nlist_ewald->getHeadList(),    access_location::device, access_mode::read );
+	
+  // Pruned neighbor list for lubrication preconditioner (constructed in Precondition_Wrap)
+  ArrayHandle<unsigned int> d_nneigh_pruned(   m_nneigh_pruned,   access_location::device, access_mode::readwrite );
+  ArrayHandle<unsigned int> d_nlist_pruned(    m_nlist_pruned,    access_location::device, access_mode::readwrite );
+  ArrayHandle<unsigned int> d_headlist_pruned( m_headlist_pruned, access_location::device, access_mode::readwrite );
+
+  ArrayHandle<int3> d_image(m_pdata->getImages(), access_location::device, access_mode::readwrite); 
+
+  // Grid vectors
+  ArrayHandle<Scalar4>      d_gridk(m_gridk, access_location::device, access_mode::readwrite); //write if deform
+  ArrayHandle<CUFFTCOMPLEX> d_gridX(m_gridX, access_location::device, access_mode::read); 
+  ArrayHandle<CUFFTCOMPLEX> d_gridY(m_gridY, access_location::device, access_mode::read); 
+  ArrayHandle<CUFFTCOMPLEX> d_gridZ(m_gridZ, access_location::device, access_mode::read); 
+	
+  ArrayHandle<CUFFTCOMPLEX> d_gridXX(m_gridXX, access_location::device, access_mode::read); 
+  ArrayHandle<CUFFTCOMPLEX> d_gridXY(m_gridXY, access_location::device, access_mode::read); 
+  ArrayHandle<CUFFTCOMPLEX> d_gridXZ(m_gridXZ, access_location::device, access_mode::read); 
+  ArrayHandle<CUFFTCOMPLEX> d_gridYX(m_gridYX, access_location::device, access_mode::read); 
+  ArrayHandle<CUFFTCOMPLEX> d_gridYY(m_gridYY, access_location::device, access_mode::read); 
+  ArrayHandle<CUFFTCOMPLEX> d_gridYZ(m_gridYZ, access_location::device, access_mode::read); 
+  ArrayHandle<CUFFTCOMPLEX> d_gridZX(m_gridZX, access_location::device, access_mode::read); 
+  ArrayHandle<CUFFTCOMPLEX> d_gridZY(m_gridZY, access_location::device, access_mode::read); 
+
+  // Real space interaction tabulation
+  ArrayHandle<Scalar4> d_ewaldC1(m_ewaldC1, access_location::device, access_mode::read);
+
+  // Lubrication calculation stuff
+  ArrayHandle<int>   d_L_RowInd( m_L_RowInd, access_location::device, access_mode::overwrite ); 
+  ArrayHandle<int>   d_L_RowPtr( m_L_RowPtr, access_location::device, access_mode::overwrite ); 
+  ArrayHandle<int>   d_L_ColInd( m_L_ColInd, access_location::device, access_mode::overwrite ); 
+  ArrayHandle<float> d_L_Val(    m_L_Val,    access_location::device, access_mode::overwrite ); 	
+  ArrayHandle<float> d_Diag(     m_Diag,     access_location::device, access_mode::overwrite ); 
+  ArrayHandle<int>   d_HasNeigh( m_HasNeigh, access_location::device, access_mode::overwrite ); 
+	
+  ArrayHandle<float> d_ResTable_dist( m_ResTable_dist, access_location::device, access_mode::read );
+  ArrayHandle<float> d_ResTable_vals( m_ResTable_vals, access_location::device, access_mode::read );
+	
+  ArrayHandle<unsigned int> d_nneigh_less( m_nneigh_less, access_location::device, access_mode::overwrite ); 
+  ArrayHandle<unsigned int> d_NEPP(        m_NEPP,        access_location::device, access_mode::overwrite ); 
+  ArrayHandle<unsigned int> d_offset(      m_offset,      access_location::device, access_mode::overwrite ); 
+
+  ArrayHandle<float> d_Scratch1( m_Scratch1, access_location::device, access_mode::overwrite ); 
+  ArrayHandle<float> d_Scratch2( m_Scratch2, access_location::device, access_mode::overwrite ); 
+  ArrayHandle<float> d_Scratch3( m_Scratch3, access_location::device, access_mode::overwrite ); 
+  ArrayHandle<int>   d_prcm(     m_prcm,     access_location::device, access_mode::overwrite );   
+
+  
+  // Particle index (may change in time, unlike tag)
+  ArrayHandle<unsigned int> d_index_array(m_group->getIndexArray(), access_location::device, access_mode::read);       
+
+  // Particle position and orientation
+  ArrayHandle<Scalar4> d_pos(m_pdata->getPositions(),     access_location::device, access_mode::readwrite ); 
+  ArrayHandle<Scalar3> d_ori(m_pdata->getAccelerations(), access_location::device, access_mode::readwrite ); //zhoge:temp
+  ArrayHandle<Scalar4> d_pos_gb(m_pdata->getVelocities(), access_location::device, access_mode::readwrite ); //zhoge:temp 
+
+  // Linear/angular velocities and applied force/torque
+  ArrayHandle<float> d_Velocity(    m_Velocity,     access_location::device, access_mode::readwrite); 
+  ArrayHandle<float> d_AppliedForce(m_AppliedForce, access_location::device, access_mode::readwrite); 
+
+  // Rotational noise
+  ArrayHandle<Scalar3> d_noise_ang(m_noise_ang, access_location::device, access_mode::read);
+  
+  // squirmer masks
+  ArrayHandle<float> d_sqm_B1_mask(m_sqm_B1_mask, access_location::device, access_mode::read); 
+  ArrayHandle<float> d_sqm_B2_mask(m_sqm_B2_mask, access_location::device, access_mode::read);
+
+	
+  // ***********************
+  // Set up data structures
+  // ***********************
+
+  
+  // Randomize seeds for stochastic calculations
+  srand( m_seed + timestep );  //zhoge: identical sequence if m_seed is fixed
+  m_seed_ff_rs = rand();
+  m_seed_ff_ws = rand();
+  m_seed_nf = rand();
+  m_seed_rfd = rand();
+
+  ////debug Brownian
+  //printf("random seeds %12i %12i %12i %12i\n",m_seed_ff_rs,m_seed_ff_ws,m_seed_nf,m_seed_rfd);
+  //exit(1);
+
+  // Initialize values in the data structure for Brownian calculation
+  BrownianData bro_struct = {
+			     m_error,  //tol
+			     timestep,
+			     m_seed_ff_rs,
+			     m_seed_ff_ws,
+			     m_seed_nf,
+			     m_seed_rfd,
+			     m_m_Lanczos_ff,
+			     m_m_Lanczos_nf,
+			     float(m_T->getValue(timestep)),
+			     m_rfd_epsilon,
+			     m_work_rfd_rhs,
+			     m_work_rfd_sol
+  };
+  BrownianData *bro_data = &bro_struct;
+
+  // Initialize values in the data structure for mobility calculations
+  MobilityData mob_struct = {
+			     m_xi,
+			     m_ewald_cut,
+			     m_ewald_dr,
+			     m_ewald_n,
+			     d_ewaldC1.data,
+			     m_self,
+			     d_nneigh_ewald.data,
+			     d_nlist_ewald.data,
+			     d_headlist_ewald.data,
+			     m_eta,
+			     m_gaussP,
+			     m_gridh,
+			     d_gridk.data,
+			     d_gridX.data,
+			     d_gridY.data,
+			     d_gridZ.data,
+			     d_gridXX.data,
+			     d_gridXY.data,
+			     d_gridXZ.data,
+			     d_gridYX.data,
+			     d_gridYY.data,
+			     d_gridYZ.data,
+			     d_gridZX.data,
+			     d_gridZY.data,
+			     plan,
+			     m_Nx,
+			     m_Ny,
+			     m_Nz
+  };
+  MobilityData *mob_data = &mob_struct;
+
+  // Initialize values in the data structure for the resistance calculations
+  //
+  // !!! The pointers to the neighbor list here are the EXACT SAME pointers
+  //     used mobility structure. Replicated here for simplicity because
+  //     it's only ever read, not modified. This way also leaves the option
+  //     open to add different neighbor list structures for the lubrication
+  //     and mobility calculations. 
+  ResistanceData res_struct = {
+			       4.0,  // lubrication cutoff, rlub 
+			       2.1,  // lubrication (preconditioner) cutoff, rp
+			       d_nneigh_ewald.data,
+			       d_nlist_ewald.data,
+			       d_headlist_ewald.data,
+			       d_nneigh_pruned.data,
+			       d_headlist_pruned.data,
+			       d_nlist_pruned.data,
+			       m_nnz,
+			       d_nneigh_less.data,
+			       d_NEPP.data,
+			       d_offset.data,
+			       d_L_RowInd.data,
+			       d_L_RowPtr.data,
+			       d_L_ColInd.data,
+			       d_L_Val.data,
+			       d_ResTable_dist.data,
+			       d_ResTable_vals.data,
+			       m_ResTable_min,
+			       m_ResTable_dr,
+			       soHandle,
+			       spHandle,
+			       spStatus,
+			       descr_R,
+			       descr_L,
+			       trans_L,
+			       trans_Lt,
+			       info_R,
+			       info_L,
+			       info_Lt,
+			       policy_R,
+			       policy_L,
+			       policy_Lt,
+			       m_pBufferSize,
+			       d_Scratch1.data,
+			       d_Scratch2.data,
+			       d_Scratch3.data,
+			       d_prcm.data,
+			       d_HasNeigh.data,
+			       d_Diag.data,
+			       m_ichol_relaxer,
+			       false,
+			       m_ndsr,    //non-dimensional shear rate
+			       m_k_n,     //collision spring const
+			       m_kappa,   //inverse Debye length for electrostatic repulsion
+			       m_beta,    //ratio of the Hamaker const and elst force scale
+			       m_epsq     //square of the vdw regularization
+  };
+  ResistanceData *res_data = &res_struct;
+
+  // Initialize values in workspace data
+  WorkData work_struct = {
+			  blasHandle,      //zhoge: was in res_data
+			  m_work_pos_rk1,  //zhoge: RK2 midstep storage
+			  m_work_ori_rk1,  //zhoge: RK2 midstep storage
+			  dot_sum,
+			  m_work_bro_gauss,  //zhoge: Gaussian random variables
+			  m_work_bro_ff_psi,
+			  m_work_bro_ff_UBreal,
+			  m_work_bro_ff_Mpsi,
+			  m_work_bro_ff_V1,
+			  m_work_bro_ff_UB_new1,
+			  m_work_bro_ff_UB_old1,
+			  m_work_bro_nf_Tm,
+			  m_work_bro_nf_V,
+			  m_work_bro_nf_FB_old,
+			  m_work_bro_nf_psi,
+			  m_work_saddle_psi,
+			  m_work_saddle_posPrime,
+			  m_work_saddle_rhs,
+			  m_work_saddle_solution,
+			  m_work_mob_couplet,
+			  m_work_mob_delu,
+			  m_work_mob_vel1,
+			  m_work_mob_vel2,
+			  m_work_mob_delu1,
+			  m_work_mob_delu2,
+			  m_work_mob_vel,
+			  m_work_mob_AngvelStrain,
+			  m_work_mob_net_force,
+			  m_work_mob_TorqueStress,
+			  m_work_precond_scratch,
+			  m_work_precond_map,
+			  m_work_precond_backup
+  };
+  WorkData *work_data = &work_struct;
+
+
+  // Time-dependent external torque (constant if m_omega_ext == 0)
+  Scalar T_ext = m_T_ext * cos(m_omega_ext * timestep * m_deltaT);
+
+  
+  // *********************************************
+  // Perform the update on the GPU (in Stokes.cu)
+  // *********************************************
+  
+	
+  Stokes_StepOne( timestep,
+		  m_period,
+		  d_pos.data,            //input/output
+		  d_ori.data,            //input/output: orientation
+		  d_pos_gb.data,         //input/output: global position (not confined to box)
+		  d_AppliedForce.data,   //input/output
+		  d_Velocity.data,       //input/output: FSD velocity and stresslet (11N)
+		  m_sqm_B1, m_sqm_B2,
+		  d_sqm_B1_mask.data,
+		  d_sqm_B2_mask.data,
+		  m_rot_diff,
+		  d_noise_ang.data,
+		  T_ext,                 //external torque
+		  m_deltaT,              //dt
+		  m_error,	       
+		  current_shear_rate,    
+		  16,                    //cuda block size
+		  d_image.data,	       
+		  d_index_array.data,    
+		  group_size,	       
+		  box,		       
+		  bro_data,	       
+		  mob_data,	       
+		  res_data,	       
+		  work_data
+		  );
+
+	
+  ////ishikawa Uncomment the following if testing ishikawa (output the velocity of the passive sphere)
+  //for (unsigned int i=0; i<group_size; i++){
+  //  unsigned int idx0 = i;
+  //  
+  //  if (h_tag_array.data[idx0] >= m_N_mix)
+  //    {
+  //      std::string filename4 = "raw/velocity_passive.txt";
+  //      FILE * file4;
+  //      file4 = fopen(filename4.c_str(), "a");
+  //      //////////////////
+  //      ArrayHandle<float> h_Velocity(m_Velocity, access_location::host, access_mode::read);
+  //
+  //      float * vel_p = & h_Velocity.data[ 6*idx0 ]; //velocity of the passive sphere
+  //      
+  //      float velx = vel_p[0];
+  //      float vely = vel_p[1];
+  //      float omgz = vel_p[5];
+  //      // Output the translational and angular velocities
+  //      fprintf (file4, "%7i %15.6e %15.6e %15.6e %15.6e \n",
+  //	       timestep, r_ishi, velx, vely, omgz);
+  //      // Close output files
+  //      fclose (file4);
+  //    }
+  //} //for loop
+  //// ----------------------------------------------------------------------------------
 	
 	
-	// Save the number of iterations, but reset every so often so that it doesn't
-	// grow too large
-	m_m_Lanczos_ff = ( ( timestep % 100 == 0 ) || ( bro_data->m_Lanczos_ff > 100 ) ) ? 2 : bro_data->m_Lanczos_ff;
-	m_m_Lanczos_nf = ( ( timestep % 100 == 0 ) || ( bro_data->m_Lanczos_nf > 100 ) ) ? 2 : bro_data->m_Lanczos_nf;
-
-	// Debug
-	//m_m_Lanczos_ff = 40;
-	//m_m_Lanczos_nf = 40;
+  // Save the number of iterations, but reset every so often so that it doesn't grow too large   //zhoge: chow & saad
+  m_m_Lanczos_ff = ( ( timestep % 100 == 0 ) || ( bro_data->m_Lanczos_ff > 50 ) ) ? 3 : bro_data->m_Lanczos_ff; 
+  m_m_Lanczos_nf = ( ( timestep % 100 == 0 ) || ( bro_data->m_Lanczos_nf > 50 ) ) ? 3 : bro_data->m_Lanczos_nf; 
+  
+  // Debug
+  //m_m_Lanczos_ff = 40;
+  //m_m_Lanczos_nf = 40;
 	
-	// Save the relaxation constant, but reset every so often (used in Precondition.cu for the Cholesky decomposition)
-	m_ichol_relaxer = ( ( timestep % 5 == 0 ) || ( m_ichol_relaxer > 1024.0 ) ) ? 1.0 : res_data->ichol_relaxer;
+  // Save the relaxation constant, but reset every so often (used in Precondition.cu for the Cholesky decomposition)
+  m_ichol_relaxer = ( ( timestep % 5 == 0 ) || ( m_ichol_relaxer > 1024.0 ) ) ? 1.0 : res_data->ichol_relaxer;
 
-	if (m_exec_conf->isCUDAErrorCheckingEnabled())
-		CHECK_CUDA_ERROR();
 
-	// done profiling
-	if (m_prof)
-		m_prof->pop(m_exec_conf);
+  // Output if the period is set (*after* updating, because the indices may change at the next time step)
+  if ( ( m_period > 0 ) && ( int(timestep+1) % m_period == 0 ) ) {
+    OutputData(int(timestep+1), box, current_shear_rate);
+  }
+
+	
+
+  if (m_exec_conf->isCUDAErrorCheckingEnabled())
+    CHECK_CUDA_ERROR();
+
+  // done profiling
+  if (m_prof)
+    m_prof->pop(m_exec_conf);
 
 }
 
@@ -1476,7 +1694,10 @@ void export_Stokes(pybind11::module& m)
   pybind11::class_<Stokes, std::shared_ptr<Stokes> > (m, "Stokes", pybind11::base<IntegrationMethodTwoStep>())
     .def(pybind11::init< std::shared_ptr<SystemDefinition>, std::shared_ptr<ParticleGroup>, std::shared_ptr<Variant>,
 	 unsigned int, std::shared_ptr<NeighborList>, Scalar, Scalar, std::string, int,
-	 Scalar, Scalar, Scalar, Scalar, Scalar >() ) //added the last 5 Scalar's for ndsr, kappa, k_n, beta_AF, epsq (zhoge)
+	 Scalar, Scalar, Scalar, Scalar, Scalar, Scalar, Scalar, unsigned int, Scalar, Scalar,
+	 Scalar, Scalar, Scalar >() )
+    //In the line above, I added ndsr, kappa, k_n, beta_AF, epsq, sqm_B1, sqm_B2, N_mix, coef_B1_mask, coef_B2_mask,
+    //rot_diff, T_ext, omega_ext (zhoge)
     .def("setT", &Stokes::setT)
     .def("setShear", &Stokes::setShear)
     .def("setParams", &Stokes::setParams)

@@ -20,7 +20,7 @@ using namespace hoomd;
 #include <cuda_runtime.h>
 
 #include "lapacke.h"
-#include "cblas.h"
+#include "cublas_v2.h"
 
 #ifdef WIN32
 #include <cassert>
@@ -131,29 +131,29 @@ __global__ void Brownian_FarField_RNG_Grid1of2_kernel(  	CUFFTCOMPLEX *gridX,
   // Do work if thread is in bounds
   if ( idx < NxNyNz ) {
  
-    //zhoge//// Scaling factor for covaraince based on Fluctuation-Dissipation
-    //zhoge//// 	fac1 = sqrt( 2.0 * T / dt / quadW );
-    //zhoge//// Scaling factor for covariance of random uniform on [-1,1]
-    //zhoge//// 	fac2 = sqrt( 3.0 )
-    //zhoge//// Scaling factor because each number has real and imaginary part
-    //zhoge//// 	fac3 = 1 / sqrt( 2.0 )	
-    //zhoge//// Total scaling factor
-    //zhoge////	fac = fac1 * fac2 * fac3 
-    //zhoge////	    = sqrt( 3.0 * T / dt / quadW )
-    //zhoge//Scalar fac = sqrtf( 3.0 * T / dt / quadW );
-    //zhoge//
-    //zhoge//// Get random numbers 
-    //zhoge//detail::Saru s(idx, seed);
-    //zhoge//		
-    //zhoge//Scalar reX = s.f( -fac, fac );
-    //zhoge//Scalar reY = s.f( -fac, fac );
-    //zhoge//Scalar reZ = s.f( -fac, fac );
-    //zhoge//Scalar imX = s.f( -fac, fac );
-    //zhoge//Scalar imY = s.f( -fac, fac );
-    //zhoge//Scalar imZ = s.f( -fac, fac );
+    //// Scaling factor for covaraince based on Fluctuation-Dissipation
+    //// 	fac1 = sqrt( 2.0 * T / dt / quadW );
+    //// Scaling factor for covariance of random uniform on [-1,1]
+    //// 	fac2 = sqrt( 3.0 )
+    //// Scaling factor because each number has real and imaginary part
+    //// 	fac3 = 1 / sqrt( 2.0 )	
+    //// Total scaling factor
+    ////	fac = fac1 * fac2 * fac3 
+    ////	    = sqrt( 3.0 * T / dt / quadW )
+    //Scalar fac = sqrtf( 3.0 * T / dt / quadW );
+    //
+    //// Get random numbers 
+    //detail::Saru s(idx, seed);
+    //		
+    //Scalar reX = s.f( -fac, fac );
+    //Scalar reY = s.f( -fac, fac );
+    //Scalar reZ = s.f( -fac, fac );
+    //Scalar imX = s.f( -fac, fac );
+    //Scalar imY = s.f( -fac, fac );
+    //Scalar imZ = s.f( -fac, fac );
 
     //zhoge: use Gaussian random variables
-    Scalar fac = sqrtf( T / dt / quadW );
+    Scalar fac = sqrtf( T / dt / quadW ); //no need to times sqrt(3) for gaussian of std=1
     
     Scalar reX = fac * d_gauss2[ idx     ];
     Scalar reY = fac * d_gauss2[ idx + 1 ];
@@ -168,7 +168,7 @@ __global__ void Brownian_FarField_RNG_Grid1of2_kernel(  	CUFFTCOMPLEX *gridX,
     int jj = ( ( idx - kk ) / Nz ) % Ny;
     int ii = ( ( idx - kk ) / Nz - jj ) / Ny;
 		
-    // Only have to do the work for half the grid points	
+    // Only have to do the work for half the grid points (zhoge: Not exactly half, can be bigger or smaller)
     if ( 	!( 2 * kk >= Nz + 1 ) &&  // Lower half of the cube across the z-plane
 		!( ( kk == 0 ) && ( 2 * jj >= Ny + 1 ) ) && // lower half of the plane across the y-line
 		!( ( kk == 0 ) && ( jj == 0 ) && ( 2 * ii >= Nx + 1 ) ) && // lower half of the line across the x-point
@@ -245,6 +245,8 @@ __global__ void Brownian_FarField_RNG_Grid1of2_kernel(  	CUFFTCOMPLEX *gridX,
 	Fluctuating force calculation. Step 2: Scaling to get action of square root of wave
 					       space contribution to the Ewald sum
 
+        zhoge: Sign error corrected (same error as in Mobility_WaveSpace_Green_kernel).
+					     
 	d_gridX		(input/output) x-component of vectors on grid
 	d_gridY		(input/output) y-component of vectors on grid
 	d_gridZ		(input/output) z-component of vectors on grid
@@ -280,14 +282,7 @@ __global__ void Brownian_FarField_RNG_Grid2of2_kernel(
 			        	    			CUFFTCOMPLEX *gridZX,
 			        	    			CUFFTCOMPLEX *gridZY,
 					      			Scalar4 *gridk,
-				              			unsigned int NxNyNz,
-					      			int Nx,
-					      			int Ny,
-					      			int Nz,
-				              			const unsigned int seed,  //zhoge: unused
-					      			Scalar T,
-					      			Scalar dt,
-					      			Scalar quadW
+				              			unsigned int NxNyNz
 				             			){
 
 	// Thread ID
@@ -295,38 +290,42 @@ __global__ void Brownian_FarField_RNG_Grid2of2_kernel(
 
 	// Check if thread is in bounds
 	if ( idx < NxNyNz ) {
-      
+
 		// Current wave-space vector 
 		Scalar4 tk = gridk[idx];
 		Scalar ksq = tk.x*tk.x + tk.y*tk.y + tk.z*tk.z;
 		Scalar k = sqrtf( ksq );
-
+		
 		// Fluctuating force values
 		Scalar2 fX = gridX[ idx ];
 		Scalar2 fY = gridY[ idx ];
 		Scalar2 fZ = gridZ[ idx ];
-	
-		// Scaling factors for the current grid
-		Scalar B = ( idx == 0 ) ? 0.0 : sqrtf( tk.w );
-		Scalar SU = ( idx == 0 ) ? 0.0 : sinf( k ) / k; // real
-		Scalar SD = ( idx == 0 ) ? 0.0 : 3.0 * ( sinf(k) - k*cosf(k) ) / (ksq * k); // imaginary!
-
-		// CONJUGATE!	
-		SD = -1. * SD;
-	
-		// Square root of Green's function times dW
-		Scalar2 kdF = ( idx == 0 ) ? make_scalar2( 0.0, 0.0 ) : make_scalar2( ( tk.x*fX.x + tk.y*fY.x + tk.z*fZ.x ) / ksq,  ( tk.x*fX.y + tk.y*fY.y + tk.z*fZ.y ) / ksq );
 		
+		// Scaling factors for the current grid
+		Scalar B = ( idx == 0 ) ? 0.0 : sqrtf( tk.w );  //tk.w = H/(\eta*V*k^2) is the Hasimoto-Green factor
+		Scalar SU = ( idx == 0 ) ? 0.0 : sinf( k ) / k; //j0 (real)
+		Scalar SD = ( idx == 0 ) ? 0.0 : 3.0 * ( sinf(k) - k*cosf(k) ) / (ksq * k); //3i*j1/k (imaginary!)
+		
+		//// CONJUGATE!
+		//SD = -1. * SD;  //zhoge: Without this gives the correct result
+		
+		// k dot f / k^2
+		Scalar2 kdF = ( idx == 0 ) ? make_scalar2( 0.0, 0.0 ) : make_scalar2( ( tk.x*fX.x + tk.y*fY.x + tk.z*fZ.x ) / ksq,
+										      ( tk.x*fX.y + tk.y*fY.y + tk.z*fZ.y ) / ksq );
+
+		// BdW = B^0.5 * (I - kk)*f, where k is the normalized k (divided by ksq above)
+		// (In the FSD paper, tk.w * (I - kk) is called \mathbb{B}.)
 		Scalar2 BdWx, BdWy, BdWz;
 		BdWx.x = ( fX.x - tk.x * kdF.x ) * B;
 		BdWx.y = ( fX.y - tk.x * kdF.y ) * B;
-
+		
 		BdWy.x = ( fY.x - tk.y * kdF.x ) * B;
 		BdWy.y = ( fY.y - tk.y * kdF.y ) * B;
-
+		
 		BdWz.x = ( fZ.x - tk.z * kdF.x ) * B;
 		BdWz.y = ( fZ.y - tk.z * kdF.y ) * B;
 
+		// BdW * k (should be \hat{k}, but that's considered in SD, which has an extra 1/k)
 		Scalar2 BdWkxx = make_scalar2( BdWx.x*tk.x, BdWx.y*tk.x );
 		Scalar2 BdWkxy = make_scalar2( BdWx.x*tk.y, BdWx.y*tk.y );
 		Scalar2 BdWkxz = make_scalar2( BdWx.x*tk.z, BdWx.y*tk.z );
@@ -335,7 +334,7 @@ __global__ void Brownian_FarField_RNG_Grid2of2_kernel(
 		Scalar2 BdWkyz = make_scalar2( BdWy.x*tk.z, BdWy.y*tk.z );
 		Scalar2 BdWkzx = make_scalar2( BdWz.x*tk.x, BdWz.y*tk.x );
 		Scalar2 BdWkzy = make_scalar2( BdWz.x*tk.y, BdWz.y*tk.y );
-	
+		
 		// Velocity
 		gridX[idx].x = SU * BdWx.x;
 		gridX[idx].y = SU * BdWx.y;
@@ -345,7 +344,7 @@ __global__ void Brownian_FarField_RNG_Grid2of2_kernel(
 		
 		gridZ[idx].x = SU * BdWz.x;
 		gridZ[idx].y = SU * BdWz.y;
-
+		
 		// Velocity Gradient
 		gridXX[idx].x = - SD * BdWkxx.y;
 		gridXX[idx].y = + SD * BdWkxx.x;
@@ -383,7 +382,7 @@ __global__ void Brownian_FarField_RNG_Grid2of2_kernel(
 	Edmond Chow and Yousef Saad, PRECONDITIONED KRYLOV SUBSPACE METHODS FOR
 	SAMPLING MULTIVARIATE GAUSSIAN DISTRIBUTIONS, SIAM J. Sci. Comput., 2014
 
-	d_psi			(input)		Random vector for multiplication (zhoge: force, torque and stress)
+	d_psi			(input)		Random vector for multiplication
 	d_pos			(input)		particle positions
 	d_group_members		(input)		indices for particles within the group
 	group_size		(input)		number of particles
@@ -409,474 +408,408 @@ __global__ void Brownian_FarField_RNG_Grid2of2_kernel(
 	work_data		(input)		data structure with points to workspaces
 
 */
-void Brownian_FarField_Lanczos( 	
-				Scalar4 *d_psi,
-				Scalar4 *d_pos,
-                                unsigned int *d_group_members,
-                                unsigned int group_size,
-                                const BoxDim& box,
-                                Scalar dt,
-			        Scalar4 *d_M12psi,
-			        const Scalar T,
-			        Scalar xi,
-			        Scalar ewald_cut,
-			        Scalar ewald_dr,
-			        int ewald_n,
-			        Scalar4 *d_ewaldC1, 
-			        const unsigned int *d_nneigh,
-                                const unsigned int *d_nlist,
-                                const unsigned int *d_headlist,
-			        int& m,
-				Scalar tol,
-			        dim3 grid,
-			        dim3 threads,
-			        Scalar3 gridh,
-			        Scalar2 self,
-				WorkData *work_data
-				){
 
-	// Dot product kernel specifications
-	unsigned int thread_for_dot = 512; // Must be 2^n
-	unsigned int grid_for_dot = (group_size/thread_for_dot) + 1;
 
-	// Temp var for dot product.
-	Scalar *dot_sum = (work_data->dot_sum);
 
-	// Allocate storage
-	// 
-	int m_in = m;
-	int m_max = 100; //zhoge: Can probably increase if not converging
+//zhoge: Re-implemented Chow & Saad (2014) method to sample correlated noise (far-field).
 
-        // Storage vectors for tridiagonal factorization
-	float *alpha, *beta, *alpha_save, *beta_save;
-        alpha = (float *)malloc( (m_max)*sizeof(float) );
-        alpha_save = (float *)malloc( (m_max)*sizeof(float) );
-        beta = (float *)malloc( (m_max+1)*sizeof(float) );
-        beta_save = (float *)malloc( (m_max+1)*sizeof(float) );
-
-	// Vectors for Lapacke and square root
-	float *W;
-	W = (float *)malloc( (m_max*m_max)*sizeof(float) );
-	float *W1; // W1 = Lambda^(1/2) * ( W^T * e1 )
-	W1 = (float *)malloc( (m_max)*sizeof(float) );
-	float *Tm;
-	Tm = (float *)malloc( m_max*sizeof(float) );
-	Scalar *d_Tm = (work_data->bro_ff_Tm);
-
-	// Vectors for Lanczos iterations
-	Scalar4 *d_v = (work_data->bro_ff_v);
-	Scalar4 *d_vj = (work_data->bro_ff_vj);
-	Scalar4 *d_vjm1 = (work_data->bro_ff_vjm1);
-
-	// Storage vector for M*vj
-	Scalar4 *d_Mvj = (work_data->bro_ff_Mvj);
-
-	// Storage array for V
-	Scalar4 *d_V = (work_data->bro_ff_V);
-
-	// Step-norm things
-	Scalar4 *d_M12psi_old = (work_data->bro_ff_UB_old);
-	Scalar4 *d_Mpsi = (work_data->bro_ff_Mpsi);
-	Scalar psiMpsi;
-
-	// Temporary pointer
-	Scalar4 *d_temp;
-
-	// Copy random vector to v0
-	cudaMemcpy( d_vj, d_psi, 3*group_size*sizeof(Scalar4), cudaMemcpyDeviceToDevice );
+__global__ void Type_conversion_Append_zero_kernel( float   *d_x,  //input
+						    Scalar4 *d_y,  //output
+						    unsigned int group_size )
+{
+  // Thread index
+  unsigned int idx = blockDim.x * blockIdx.x + threadIdx.x;
 	
-        Scalar vnorm;
-	Brownian_FarField_Dot1of2_kernel<<< grid_for_dot, thread_for_dot, thread_for_dot*sizeof(Scalar) >>>(d_vj, d_vj,
-													    dot_sum, //output
-													    group_size,
-													    d_group_members);
-	Brownian_FarField_Dot2of2_kernel<<< 1, thread_for_dot, thread_for_dot*sizeof(Scalar) >>>(dot_sum, //input/output
-												 grid_for_dot);
-	cudaMemcpy(&vnorm, dot_sum, sizeof(Scalar), cudaMemcpyDeviceToHost);
-	vnorm = sqrtf( vnorm );
-
-	Scalar psinorm = vnorm;
-
-    	// Compute psi * M * psi ( for step norm )
-	Mobility_RealSpaceFTS(
-				d_pos,
-				d_Mpsi,               //output: linear velocity of particles
-				&d_Mpsi[group_size],  //output: angular velocity and rate of strain of particles
-				d_psi,                //input:  linear force on particles
-				&d_psi[group_size],   //input:  torque and stress on particles
-				(work_data->mob_couplet),
-				(work_data->mob_delu),  //zhoge: modified inside !!!
-				d_group_members,
-				group_size,
-				box,
-				xi,
-				ewald_cut,
-				ewald_dr,
-				ewald_n,
-				d_ewaldC1,
-				self,
-				d_nneigh,
-				d_nlist,
-				d_headlist,
-				grid,
-				threads
-				);
-	
-	//cudaMemcpy( d_Mvj, d_vj, 3*group_size*sizeof(Scalar4), cudaMemcpyDeviceToDevice );
-    	
-	Brownian_FarField_Dot1of2_kernel<<< grid_for_dot, thread_for_dot, thread_for_dot*sizeof(Scalar) >>>(d_psi, d_Mpsi, dot_sum, group_size, d_group_members);
-    	Brownian_FarField_Dot2of2_kernel<<< 1, thread_for_dot, thread_for_dot*sizeof(Scalar) >>>(dot_sum, grid_for_dot);
-    	cudaMemcpy(&psiMpsi, dot_sum, sizeof(Scalar), cudaMemcpyDeviceToHost);
-
-	psiMpsi = psiMpsi / ( psinorm * psinorm );
-
-        // First iteration, vjm1 = 0, vj = psi / norm( psi )
-	Brownian_Farfield_LinearCombinationFTS_kernel<<<grid, threads>>>(d_vj, d_vj, d_vjm1, 0.0, 0.0, group_size, d_group_members);
-	Brownian_Farfield_LinearCombinationFTS_kernel<<<grid, threads>>>(d_vj, d_vj, d_vj, 1.0/vnorm, 0.0, group_size, d_group_members);
-
-	m = m_in - 1;
-	m = m < 1 ? 1 : m;
-
-	Scalar tempalpha;
-	Scalar tempbeta = 0.0;
-
-	tempbeta = 0.0;
-	for ( int jj = 0; jj < m; ++jj ){
-
-		// Store current basis vector
-		cudaMemcpy( &d_V[jj*3*group_size], d_vj, 3*group_size*sizeof(Scalar4), cudaMemcpyDeviceToDevice );
-
-		// Store beta
-		beta[jj] = tempbeta;
-
-		// v = M*vj - betaj*vjm1
-		Mobility_RealSpaceFTS(
-					d_pos,
-					d_Mvj,
-					&d_Mvj[group_size],
-					d_vj,
-					&d_vj[group_size],
-					(work_data->mob_couplet),
-					(work_data->mob_delu),
-					d_group_members,
-					group_size,
-					box,
-					xi,
-					ewald_cut,
-					ewald_dr,
-					ewald_n,
-					d_ewaldC1,
-					self,
-					d_nneigh,
-					d_nlist,
-					d_headlist,
-					grid,
-					threads
-					);
-		
-		//cudaMemcpy( d_Mvj, d_vj, 3*group_size*sizeof(Scalar4), cudaMemcpyDeviceToDevice );
-		
-		Brownian_Farfield_LinearCombinationFTS_kernel<<<grid, threads>>>(d_Mvj, d_vjm1, d_v, 1.0, -1.0*tempbeta, group_size, d_group_members);
-
-		// vj dot v
-	        Brownian_FarField_Dot1of2_kernel<<< grid_for_dot, thread_for_dot, thread_for_dot*sizeof(Scalar) >>>(d_vj, d_v, dot_sum, group_size, d_group_members);
-	        Brownian_FarField_Dot2of2_kernel<<< 1, thread_for_dot, thread_for_dot*sizeof(Scalar) >>>(dot_sum, grid_for_dot);
-	        cudaMemcpy(&tempalpha, dot_sum, sizeof(Scalar), cudaMemcpyDeviceToHost);
-
-		// Store updated alpha
-		alpha[jj] = tempalpha;
-	
-		// v = v - alphaj*vj
-		Brownian_Farfield_LinearCombinationFTS_kernel<<<grid, threads>>>(d_v, d_vj, d_v, 1.0, -1.0*tempalpha, group_size, d_group_members);
-
-		// v dot v 
-	        Brownian_FarField_Dot1of2_kernel<<< grid_for_dot, thread_for_dot, thread_for_dot*sizeof(Scalar) >>>(d_v, d_v, dot_sum, group_size, d_group_members);
-	        Brownian_FarField_Dot2of2_kernel<<< 1, thread_for_dot, thread_for_dot*sizeof(Scalar) >>>(dot_sum, grid_for_dot);
-	        cudaMemcpy(&vnorm, dot_sum, sizeof(Scalar), cudaMemcpyDeviceToHost);
-		vnorm = sqrtf( vnorm );
-
-		// betajp1 = norm( v )
-		tempbeta = vnorm;
-
-		if ( vnorm < 1E-8 ){
-
-		    m = jj;
-		    break;
-		}
-
-		// vjp1 = v / betajp1
-		Brownian_Farfield_LinearCombinationFTS_kernel<<<grid, threads>>>(d_v, d_v, d_v, 1.0/tempbeta, 0.0, group_size, d_group_members);
-
-		// Swap pointers
-		d_temp = d_vjm1;
-		d_vjm1 = d_vj;
-		d_vj = d_v;
-		d_v = d_temp;
-				
-	}
-
-	// Save alpha, beta vectors (will be overwritten by lapack)
-	for ( int ii = 0; ii < m; ++ii ){
-		alpha_save[ii] = alpha[ii];
-		beta_save[ii] = beta[ii];
-	}
-	beta_save[m] = beta[m];
-
-
-	// Compute eigen-decomposition of tridiagonal matrix
-	// 	alpha (input) - vector of entries on main diagonal
-	//      alpha (output) - eigenvalues sorted in descending order
-	//      beta (input) - vector of entries of sub-diagonal
-	//      beta (output) - overwritten (zeros?)
-	//      W - (output) - matrix of eigenvectors. ith column corresponds to ith eigenvalue
-	// 	INFO (output) = 0 if operation was succesful
-	int INFO = LAPACKE_spteqr( LAPACK_ROW_MAJOR, 'I', m, alpha, &beta[1], W, m );
-
-	if ( INFO != 0 ){
-	    printf("Eigenvalue decomposition #1 failed \n");
-	    printf("INFO = %i \n", INFO);
-
-	    printf("\n alpha: \n");
-	    for( int ii = 0; ii < m; ++ii ){
-		printf("%f \n", alpha_save[ii]);
-	    } 
-	    printf("\n beta: \n");
-	    for( int ii = 0; ii < m; ++ii ){
-		printf("%f \n", beta_save[ii]);
-	    }
-	    printf("%f \n", beta_save[m]); 
-
-	    exit(EXIT_FAILURE);
-	}
-
-
-//	printf("    doing square root...\n");
-
-	// Now, we have to compute Tm^(1/2) * e1
-	// 	Tm^(1/2) = W * Lambda^(1/2) * W^T * e1
-	//	         = W * Lambda^(1/2) * ( W^T * e1 )
-	// The quantity in parentheses is the first row of W 
-	// Lambda^(1/2) only has diagonal entries, so it's product with the first row of W
-	//     is easy to compute.
-	for ( int ii = 0; ii < m; ++ii ){
-	    W1[ii] = sqrtf( alpha[ii] ) * W[ii];
-	}
-
-	// Tm = W * W1 = W * Lambda^(1/2) * W^T * e1
-	float tempsum;
-	for ( int ii = 0; ii < m; ++ii ){
-	    tempsum = 0.0;
-	    for ( int jj = 0; jj < m; ++jj ){
-		int idx = m*ii + jj;
-
-		tempsum += W[idx] * W1[jj];
-	    }
-	    Tm[ii] = tempsum;
-	}
-
-	// Copy matrix to GPU
-	cudaMemcpy( d_Tm, Tm, m*sizeof(Scalar), cudaMemcpyHostToDevice );
-
-	// Multiply basis vectors by Tm
-	Brownian_FarField_LanczosMatrixMultiply_kernel<<<grid,threads>>>(d_V, d_Tm, d_M12psi, group_size, m);
-
-	// Copy velocity
-	cudaMemcpy( d_M12psi_old, d_M12psi, 3*group_size*sizeof(Scalar4), cudaMemcpyDeviceToDevice );
-
-	// Restore alpha, beta
-	for ( int ii = 0; ii < m; ++ii ){
-		alpha[ii] = alpha_save[ii];
-		beta[ii] = beta_save[ii];
-	}
-	beta[m] = beta_save[m];
-
-
-	//
-	// Keep adding to basis until step norm is small enough
-	//
-	Scalar stepnorm = 1.0;
-	int jj;
-	while( stepnorm > tol && m < m_max ){
-		m++;
-		jj = m - 1;
-
-		//
-		// Do another Lanczos iteration
-		//
-
-		cudaMemcpy( &d_V[jj*3*group_size], d_vj, 3*group_size*sizeof(Scalar4), cudaMemcpyDeviceToDevice ); // store current basis vector
-
-		beta[jj] = tempbeta; // store beta
-
-		// v = M*vj - betaj*vjm1
-		Mobility_RealSpaceFTS(
-					d_pos,
-					d_Mvj,
-					&d_Mvj[group_size],
-					d_vj,
-					&d_vj[group_size],
-					(work_data->mob_couplet),
-					(work_data->mob_delu),
-					d_group_members,
-					group_size,
-					box,
-					xi,
-					ewald_cut,
-					ewald_dr,
-					ewald_n,
-					d_ewaldC1,
-					self,
-					d_nneigh,
-					d_nlist,
-					d_headlist,
-					grid,
-					threads
-					);
-		
-		//cudaMemcpy( d_Mvj, d_vj, 3*group_size*sizeof(Scalar4), cudaMemcpyDeviceToDevice );
-		
-		Brownian_Farfield_LinearCombinationFTS_kernel<<<grid, threads>>>(d_Mvj, d_vjm1, d_v, 1.0, -1.0*tempbeta, group_size, d_group_members);
-
-		// vj dot v
-	        Brownian_FarField_Dot1of2_kernel<<< grid_for_dot, thread_for_dot, thread_for_dot*sizeof(Scalar) >>>(d_vj, d_v, dot_sum, group_size, d_group_members);
-	        Brownian_FarField_Dot2of2_kernel<<< 1, thread_for_dot, thread_for_dot*sizeof(Scalar) >>>(dot_sum, grid_for_dot);
-	        cudaMemcpy(&tempalpha, dot_sum, sizeof(Scalar), cudaMemcpyDeviceToHost);
-
-		alpha[jj] = tempalpha; // store updated alpha
-	
-		// v = v - alphaj*vj
-		Brownian_Farfield_LinearCombinationFTS_kernel<<<grid, threads>>>(d_v, d_vj, d_v, 1.0, -1.0*tempalpha, group_size, d_group_members);
-
-		// v dot v 
-	        Brownian_FarField_Dot1of2_kernel<<< grid_for_dot, thread_for_dot, thread_for_dot*sizeof(Scalar) >>>(d_v, d_v, dot_sum, group_size, d_group_members);
-	        Brownian_FarField_Dot2of2_kernel<<< 1, thread_for_dot, thread_for_dot*sizeof(Scalar) >>>(dot_sum, grid_for_dot);
-	        cudaMemcpy(&vnorm, dot_sum, sizeof(Scalar), cudaMemcpyDeviceToHost);
-		vnorm = sqrtf( vnorm );
-
-		tempbeta = vnorm; // betajp1 = norm( v )
-
-		beta[jj+1] = tempbeta;
-
-		//printf("jj = %i, m = %i, beta = %f, vnorm = %f \n", jj, m, tempbeta, vnorm);
-
-		if ( vnorm < 1E-8 ){
-		    m = jj;
-		    break;
-		}
-
-		// vjp1 = v / betajp1
-		Brownian_Farfield_LinearCombinationFTS_kernel<<<grid, threads>>>(d_v, d_v, d_v, 1.0/tempbeta, 0.0, group_size, d_group_members);
-
-		// Swap pointers
-		d_temp = d_vjm1;
-		d_vjm1 = d_vj;
-		d_vj = d_v;
-		d_v = d_temp;
-			
-		// Save alpha, beta vectors (will be overwritten by lapack)
-		for ( int ii = 0; ii < m; ++ii ){
-			alpha_save[ii] = alpha[ii];
-			beta_save[ii] = beta[ii];
-		}
-		beta_save[m] = beta[m];
-	
-		//
-		// Square root calculation with addition of latest Lanczos iteration
-		//
-	
-		// Compute eigen-decomposition of tridiagonal matrix
-		int INFO = LAPACKE_spteqr( LAPACK_ROW_MAJOR, 'I', m, alpha, &beta[1], W, m );
-
-		if ( INFO != 0 ){
-		    printf("Eigenvalue decomposition #2 failed \n");
-		    printf("INFO = %i \n", INFO); 
-	    
-	    	    printf("\n alpha: \n");
-	    	    for( int ii = 0; ii < m; ++ii ){
-	    	        printf("%f \n", alpha_save[ii]);
-	    	    } 
-	    	    printf("\n beta: \n");
-	    	    for( int ii = 0; ii < m; ++ii ){
-	    	        printf("%f \n", beta_save[ii]);
-	    	    }
-		    printf("%f \n", beta_save[m]); 
-	    
-		    exit(EXIT_FAILURE);
-		}
-
-		// Now, we have to compute Tm^(1/2) * e1
-		for ( int ii = 0; ii < m; ++ii ){
-		    W1[ii] = sqrtf( alpha[ii] ) * W[ii];
-		}
-		// Tm = W * W1 = W * Lambda^(1/2) * W^T * e1
-		float tempsum;
-		for ( int ii = 0; ii < m; ++ii ){
-		    tempsum = 0.0;
-		    for ( int jj = 0; jj < m; ++jj ){
-			int idx = m*ii + jj;
-
-			tempsum += W[idx] * W1[jj];
-		    }
-		    Tm[ii] = tempsum;
-		}
-
-		// Copy matrix to GPU
-		cudaMemcpy( d_Tm, Tm, m*sizeof(Scalar), cudaMemcpyHostToDevice );
-
-		// Multiply basis vectors by Tm -- velocity = Vm * Tm
-		Brownian_FarField_LanczosMatrixMultiply_kernel<<<grid,threads>>>(d_V, d_Tm, d_M12psi, group_size, m);
-
-		//
-		// Compute step norm error
-		//
-    		Brownian_Farfield_LinearCombinationFTS_kernel<<<grid, threads>>>(d_M12psi, d_M12psi_old, d_M12psi_old, 1.0, -1.0, group_size, d_group_members);
-        	Brownian_FarField_Dot1of2_kernel<<< grid_for_dot, thread_for_dot, thread_for_dot*sizeof(Scalar) >>>(d_M12psi_old, d_M12psi_old, dot_sum, group_size, d_group_members);
-        	Brownian_FarField_Dot2of2_kernel<<< 1, thread_for_dot, thread_for_dot*sizeof(Scalar) >>>(dot_sum, grid_for_dot);
-        	cudaMemcpy(&stepnorm, dot_sum, sizeof(Scalar), cudaMemcpyDeviceToHost);
-
-		stepnorm = sqrtf( stepnorm / psiMpsi );
-
-		// DEBUG
-		//printf("iteration: %i | StepNorm: %f | alpha: %f | beta: %f \n", m, stepnorm, tempalpha, tempbeta );
-
-		// Copy velocity
-		cudaMemcpy( d_M12psi_old, d_M12psi, 3*group_size*sizeof(Scalar4), cudaMemcpyDeviceToDevice );
-
-		// Restore alpha, beta
-		for ( int ii = 0; ii < m; ++ii ){
-			alpha[ii] = alpha_save[ii];
-			beta[ii] = beta_save[ii];
-		}
-		beta[m] = beta_save[m];
-			
-	}
-
-	// Rescale by original norm of Psi and add thermal variance
-	Brownian_Farfield_LinearCombinationFTS_kernel<<<grid, threads>>>(d_M12psi, d_M12psi, d_M12psi, psinorm * sqrtf(2.0*T/dt), 0.0, group_size, d_group_members);
-        
-	// Free the memory and clear pointers
-	dot_sum = NULL;
-	d_Mvj = NULL;
-	d_v = NULL;
-	d_vj = NULL;
-	d_vjm1 = NULL;
-	d_V = NULL;
-	d_Tm = NULL;
-	d_M12psi_old = NULL;
-	d_Mpsi = NULL;
-
-	d_temp = NULL;
-
-	free(alpha);
-	free(beta);
-	free(alpha_save);
-	free(beta_save);
-
-	free(W);
-	free(W1);
-	free(Tm);
-	
+  // Check if thread is within bounds
+  if ( idx < group_size )
+    {
+      // [ F0x,F0y,F0z,     F1x,F1y,F1z,    ... ] ->
+      // [ F0x,F0y,F0z,0], [F1x,F1y,F1z,0], ... ]
+      d_y[idx] = make_scalar4( d_x[ 3*idx     ],
+			       d_x[ 3*idx + 1 ],
+			       d_x[ 3*idx + 2 ],
+			       0.0 );
+    }
 }
+
+__global__ void Type_conversion_Append_five_zeros_kernel( float   *d_x,  //input
+							  Scalar4 *d_y,  //output
+							  unsigned int group_size )
+{
+  // Thread index
+  unsigned int idx = blockDim.x * blockIdx.x + threadIdx.x;
+	
+  // Check if thread is within bounds
+  if ( idx < group_size )
+    {
+      // [ T0x,T0y,T0z,                T1x,T1y,T1z,              ... ] ->
+      // [ T0x,T0y,T0z,0], [0,0,0,0], [T1x,T1y,T1z,0], [0,0,0,0] ... ]
+      d_y[2*idx] = make_scalar4( d_x[ 3*idx     ],
+				 d_x[ 3*idx + 1 ],
+				 d_x[ 3*idx + 2 ],
+				 0.0 );
+      d_y[2*idx+1] = make_scalar4( 0.0, 0.0, 0.0, 0.0 );
+    }
+}
+
+
+__global__ void Type_conversion_Pop_zero_kernel( float   *d_x,  //output
+						 Scalar4 *d_y,  //input
+						 unsigned int group_size )
+{
+  // Thread index
+  unsigned int idx = blockDim.x * blockIdx.x + threadIdx.x;
+	
+  // Check if thread is within bounds
+  if ( idx < group_size )
+    {
+      // [ F0x,F0y,F0z,     F1x,F1y,F1z,    ... ] <-
+      // [ F0x,F0y,F0z,0], [F1x,F1y,F1z,0], ... ]
+      d_x[ 3*idx     ] = d_y[ idx ].x;
+      d_x[ 3*idx + 1 ] = d_y[ idx ].y;
+      d_x[ 3*idx + 2 ] = d_y[ idx ].z;
+    }
+}
+
+
+__global__ void Type_conversion_Pop_strain_kernel( float   *d_x,  //output
+						   Scalar4 *d_y,  //input
+						   unsigned int group_size )
+{
+  // Thread index
+  unsigned int idx = blockDim.x * blockIdx.x + threadIdx.x;
+	
+  // Check if thread is within bounds
+  if ( idx < group_size )
+    {
+      // Pop the strain, keep the omega
+      d_x[ 3*idx     ] = d_y[ 2*idx ].x;
+      d_x[ 3*idx + 1 ] = d_y[ 2*idx ].y;
+      d_x[ 3*idx + 2 ] = d_y[ 2*idx ].z;
+    }
+}
+
+
+void Lanczos_process( float *d_vm,  //input
+		      float *d_v,   //input
+		      float *d_vp,  //output
+		      float *alpha, //output
+		      float *beta,  //output/input
+		      float tol_beta,
+		      int numel,
+		      Scalar4 *d_pos,
+		      unsigned int *d_group_members,
+		      const int group_size, 
+		      const BoxDim box,
+		      //void *pBuffer,
+		      KernelData *ker_data,
+		      //ResistanceData *res_data,
+		      MobilityData *mob_data,
+		      WorkData *work_data )
+{
+  // cuBLAS handle
+  cublasHandle_t blasHandle = work_data->blasHandle;
+
+  // Kernel information
+  dim3 grid    = ker_data->particle_grid;
+  dim3 threads = ker_data->particle_threads;
+
+  // Apply A to d_v (d_vp = A * d_v), which takes a few extra steps due to different data structures in the mobility.
+  Scalar4 *d_psi  = work_data->bro_ff_psi;
+  Scalar4 *d_Mpsi = work_data->bro_ff_Mpsi;
+
+  // Copy d_v to d_psi (but be careful with the zeros)
+  Type_conversion_Append_zero_kernel<<<grid,threads>>>( d_v,   //input (the first 3N floats)
+							d_psi, //output (the first N Scalar4's)
+							group_size );
+  // if input 6N Gaussians
+  //Type_conversion_Append_five_zeros_kernel<<<grid,threads>>>( &d_v[3*group_size],  //input (the next 3N floats)
+  //							      &d_psi[group_size],  //output (the next 2N Scalar4's)
+  //							      group_size );
+  // if input 11N Gaussians
+  cudaMemcpy( &d_psi[group_size], &d_v[3*group_size], 2*group_size*sizeof(Scalar4), cudaMemcpyDeviceToDevice );
+
+  // Do the mobility calculation, [U D] = M * [F C]
+  Mobility_RealSpaceFTS( d_pos,
+			 d_Mpsi,               //output: linear velocity of particles (Scalar4)
+			 &d_Mpsi[group_size],  //output: angular velocity and rate of strain of particles (Scalar4)
+			 d_psi,                //input:  linear force on particles (Scalar4)
+			 &d_psi[group_size],   //input:  torque and stress on particles (Scalar4)
+			 work_data->mob_couplet,
+			 work_data->mob_delu,  //zhoge: modified inside !!!
+			 d_group_members,
+			 group_size,
+			 box,
+			 mob_data->xi,
+			 mob_data->ewald_cut,
+			 mob_data->ewald_dr,
+			 mob_data->ewald_n,
+			 mob_data->ewald_table, //zhoge: called mob_data->d_ewaldC1 in the mobility
+			 mob_data->self,
+			 mob_data->nneigh,
+			 mob_data->nlist,
+			 mob_data->headlist,
+			 ker_data->particle_grid,
+			 ker_data->particle_threads );
+
+  // Copy d_Mpsi to d_vp (but be careful with the zeros)
+  Type_conversion_Pop_zero_kernel<<<grid,threads>>>( d_vp,   //output (the first 3N floats)
+						     d_Mpsi, //input (the first N Scalar4's)
+						     group_size );
+  // if input 6N Gaussians
+  //Type_conversion_Pop_strain_kernel<<<grid,threads>>>( &d_vp[3*group_size],  //output (the next 3N floats)
+  //						       &d_Mpsi[group_size],  //input (the next 2N Scalar4's)
+  //						       group_size );
+  // if input 11N Gaussians
+  cudaMemcpy( &d_vp[3*group_size], &d_Mpsi[group_size], 2*group_size*sizeof(Scalar4), cudaMemcpyDeviceToDevice );
+  // End applying A to d_v.
+  
+  
+  // Project out d_vm (d_vp = d_vp - beta * d_vm)
+  float scale = -1.0 * beta[0];
+  cublasSaxpy( blasHandle, numel, &scale, d_vm, 1, d_vp, 1 );  //d_vp is modified in place
+
+  // The diagonal value associated with dv (alpha = d_v \cdot d_vp)
+  cublasSdot( blasHandle, numel, d_v, 1, d_vp, 1, alpha );
+  
+  // Project out d_v (d_vp = d_vp - alpha * d_v)
+  scale = -1.0 * alpha[0];
+  cublasSaxpy( blasHandle, numel, &scale, d_v, 1, d_vp, 1 );  //d_vp is modified in place
+
+  // The norm of d_vp (betap = || d_vp ||)
+  cublasSnrm2( blasHandle, numel, d_vp, 1, &beta[1] );
+
+  // Check if the norm has become very small and if so, set d_vp = d_v
+  if ( beta[1] < tol_beta )
+    {
+      cudaMemcpy( d_vp, d_v, numel*sizeof(float), cudaMemcpyDeviceToDevice );
+    }
+  else  //otherwise normalize d_vp
+    {
+      scale = 1.0 / beta[1];
+      cublasSscal( blasHandle, numel, &scale, d_vp, 1 );  //d_vp is modified in place
+    }
+  
+}
+
+
+
+void Brownian_FarField_Chow_Saad( Scalar *d_y,  //output: far-field Brownian slip (real part)
+				  Scalar *d_x,  //input: random Gaussian variables
+				  Scalar4 *d_pos,
+				  unsigned int *d_group_members,
+				  unsigned int group_size,
+				  const BoxDim& box,
+				  Scalar dt,
+				  //void *pBuffer,
+				  KernelData *ker_data,
+				  BrownianData *bro_data,
+				  //ResistanceData *res_data,
+				  MobilityData *mob_data,
+				  WorkData *work_data)
+{
+  // cuBLAS handle
+  cublasHandle_t blasHandle = work_data->blasHandle;
+
+  // Constants
+  //int numel = 6 * group_size;      //size of v1,v2,...,vm_max, d_x, d_y
+  int numel = 11 * group_size;     //size of v1,v2,...,vm_max, d_x, d_y
+  int m = bro_data->m_Lanczos_ff;  //number of Lanczos iterations in step 1 (either same as last time or reset in Stokes.cc)
+  int m_max = 100;                 //m_max-1 is the maximum size of Tm at the end of step 2 (set to 100 in Stokes.cc)
+
+  //debug
+  if ( m >= m_max-1 )
+    {
+      printf("Illegal condition: m >= m_max-1. Program aborted.");
+      exit(1);
+    }
+  
+  // Host vectors for the main and sub-diagonal values of Tm
+  float *h_alpha  = (float *)malloc( (m_max)*sizeof(float) );
+  float *h_beta   = (float *)malloc( (m_max)*sizeof(float) );
+  float *h_alpha1 = (float *)malloc( (m_max)*sizeof(float) );  //buffer
+  float *h_beta1  = (float *)malloc( (m_max)*sizeof(float) );  //buffer
+
+  // Set the first element of beta to 0
+  h_beta[0] = 0.0;
+
+  // Set the tolerance for beta (less than 1e-6 even for single precision because ||vm|| can be << 1)
+  float tol_beta = 1e-8; 
+
+  // Buffer vector for checking convergence
+  Scalar *d_y0 = work_data->bro_ff_UB_old1;  
+
+  // Lanczos basis vectors V = [v0, v1, v2, ..., vm_max], v0 is a placeholder
+  Scalar *d_V = work_data->bro_ff_V1;
+	
+  // Zero out v0
+  float scale = 0.0;
+  cublasSscal( blasHandle, numel, &scale, d_V, 1 );
+  
+  // Initialize v1 = d_x / ||d_x||
+  float xnorm;
+  cublasSnrm2( blasHandle, numel, d_x, 1, &xnorm );
+  
+  cudaMemcpy( &d_V[numel], d_x, numel*sizeof(float), cudaMemcpyDeviceToDevice );
+  
+  scale = 1.0 / xnorm;
+  cublasSscal( blasHandle, numel, &scale, &d_V[numel], 1 ); 
+  
+  //
+  // Step 1: Build Vm and Tm via the Lanczos process
+  //
+  for ( int j = 0; j < m; ++j )  //iterate at most m times 
+    {
+      // Find Vm and Tm that approximately satisfy Vm^T * A * Vm = Tm  
+      Lanczos_process( &d_V[  j   *numel ],  //input
+		       &d_V[ (j+1)*numel ],  //input
+		       &d_V[ (j+2)*numel ],  //output
+		       &h_alpha[ j ],        //output
+		       &h_beta[  j ],        //input [j] / output [j+1]
+		       tol_beta,
+		       numel,
+		       d_pos,
+		       d_group_members,
+		       group_size, 
+		       box,
+		       //pBuffer,
+		       ker_data,
+		       //res_data,
+		       mob_data,
+		       work_data );
+
+      // Stop if beta becomes very small
+      if ( h_beta[j+1] < tol_beta )
+	{
+	  m = j+1;  //plus 1 because one iteration was done when j=0
+	  break;
+	}		
+    }  
+
+  ////debug
+  //printf("m = %i\n",m);
+  //for (int i=0; i<m; ++i){
+  //  printf("alpha[%2i] = %f\n",i,h_alpha[i]);
+  //}
+  //printf("\n");
+  //for (int i=0; i<m; ++i){
+  //  printf("beta[ %2i] = %f\n",i,h_beta[ i]);
+  //}
+  //exit(1);
+
+  //
+  // Step 2: Iteratively compute d_y until convergence
+  //
+  Sqrt_multiply( &d_V[ numel ],  //input
+		 h_alpha,        //input
+		 h_beta,	 //input
+		 h_alpha1,	 //input (buffer)
+		 h_beta1,        //input (buffer)
+		 m,              //input 
+		 d_y0,           //output
+		 numel,
+		 group_size,
+		 ker_data,
+		 work_data );
+
+  float error = 1.0;
+  float ynorm = 1.0;
+
+  cublasSnrm2( blasHandle, numel, d_y0, 1, &ynorm );
+
+  ////debug
+  //printf("Step 2: norm of d_y0 %10.3e\n",ynorm); 
+  //exit(1);
+  
+  while( error > bro_data->tol and m < m_max-1 )
+    {
+      // Iteratively increase m
+      Lanczos_process( &d_V[  m   *numel ],  //input
+		       &d_V[ (m+1)*numel ],  //input
+		       &d_V[ (m+2)*numel ],  //output
+		       &h_alpha[ m ],        //output
+		       &h_beta[  m ],        //input [m] / output [m+1]
+		       tol_beta,
+		       numel,
+		       d_pos,
+		       d_group_members,
+		       group_size, 
+		       box,
+		       //pBuffer,
+		       ker_data,
+		       //res_data,
+		       mob_data,
+		       work_data );
+
+      // Compute the new approximate solution, d_y
+      Sqrt_multiply( &d_V[ numel ],  //input
+		     h_alpha,        //input
+		     h_beta,	     //input
+		     h_alpha1,	     //input (buffer)
+		     h_beta1,        //input (buffer)
+		     m+1,            //input 
+		     d_y,            //output
+		     numel,
+		     group_size,
+		     ker_data,
+		     work_data );
+
+      	
+      // Compute relative error = || d_y0 - d_y || / || d_y ||
+      scale = -1.0;
+      cublasSaxpy( blasHandle, numel, &scale, d_y, 1, d_y0, 1 );  //d_y0 is modified in place
+      cublasSnrm2( blasHandle, numel, d_y0, 1, &error );
+      cublasSnrm2( blasHandle, numel, d_y,  1, &ynorm );
+      error /= ynorm;
+
+      ////debug
+      //printf("Chow & Saad (far-field) iteration %3i, relative error %13.6e (norm of d_y %13.6e)\n",m,error,ynorm);
+
+      // Update solution
+      cudaMemcpy( d_y0, d_y, numel*sizeof(float), cudaMemcpyDeviceToDevice );
+
+      // Stop if beta becomes very small (even if the error is not small enough)
+      if ( h_beta[m+1] < tol_beta )
+	{
+	  ++m;
+	  break;
+	}
+
+      // Increment m
+      ++m;
+	
+    }
+  
+  ////debug
+  //printf("\n");
+
+  // Finalize
+  if ( error > bro_data->tol )
+    {
+      printf("\nChow & Saad (far-field) didn't converge after %i iterations.\n",m-1);
+      printf("Final relative error %13.6e\n",error);
+      printf("Last beta %13.6e\n",h_beta[m]);
+      //printf("\nProgram aborted.\n");
+      //exit(1);
+    }
+  
+  // Save the number of required iterations (minus 1 because incremented at the end)
+  bro_data->m_Lanczos_ff = m-1;
+
+  // Rescale by original norm of d_x and the thermal scale (2*kT/dt)^0.5
+  xnorm *= sqrtf(2.0 * bro_data->T / dt);
+  cublasSscal( blasHandle, numel, &xnorm, d_y, 1 );
+  
+  // Clean up
+  free(h_alpha);
+  free(h_alpha1);
+  free(h_beta);
+  free(h_beta1);
+}
+
+
+
+
 
 
 /*
@@ -905,32 +838,32 @@ void Brownian_FarField_SlipVelocity(float *d_Uslip_ff,
 				    WorkData *work_data)
 {
   // Kernel Stuff
-  dim3 gridNBlock = (ker_data->grid_grid);
-  dim3 gridBlockSize = (ker_data->grid_threads);
+  dim3 gridNBlock    = ker_data->grid_grid;
+  dim3 gridBlockSize = ker_data->grid_threads;
 
-  dim3 grid = (ker_data->particle_grid);
-  dim3 threads = (ker_data->particle_threads);
+  dim3 grid    = ker_data->particle_grid;
+  dim3 threads = ker_data->particle_threads;
 
   // Initialize storage variables for velocity and angular velocity/rate of strain
   Scalar4 *d_vel = (work_data->mob_vel);
   Scalar4 *d_delu = (work_data->mob_delu);
-  Scalar4 *d_delu1 = (work_data->mob_delu1); //zhoge: need this because delu will be modified in the Lanczos by Mobility_RealSpaceFTS
+  Scalar4 *d_delu1 = work_data->mob_delu1; //zhoge: need this because delu will be modified in Lanczos by Mobility_RealSpaceFTS
 
   // Real space contribution	
   Scalar4 *d_Mreal12psi = (work_data->bro_ff_UBreal);
-  Scalar4 *d_psi = (work_data->bro_ff_psi);
+  //Scalar4 *d_psi = (work_data->bro_ff_psi);
 
-  //brownian single particle//// Generate uniform distribution (-1,1) on d_psi (zhoge: actually from -sqrt(3) to sqrt(3))
-  //brownian single particle//// VERY IMPORTANT TO USE A DIFFERENT, DE-CORRELATED SEED FROM THE OTHER RANDOM FUNCTION FOR WAVE SPACE!!!!!
-  //brownian single particle//Brownian_FarField_RNG_Particle_kernel<<<grid, threads>>>(d_psi,  //output
-  //brownian single particle//							   group_size,
-  //brownian single particle//							   d_group_members,
-  //brownian single particle//							   bro_data->seed_ff_rs );
+  //// Generate uniform distribution (-1,1) on d_psi (zhoge: actually from -sqrt(3) to sqrt(3))
+  //// VERY IMPORTANT TO USE A DIFFERENT, DE-CORRELATED SEED FROM THE OTHER RANDOM FUNCTION FOR WAVE SPACE!!!!!
+  //Brownian_FarField_RNG_Particle_kernel<<<grid, threads>>>(d_psi,  //output
+  //							   group_size,
+  //							   d_group_members,
+  //							   bro_data->seed_ff_rs );
 
   //zhoge: use cuRand to generate Gaussian variables
   curandGenerator_t gen;
-  float *d_gauss = (work_data->bro_gauss);
-  unsigned int N_random = 12*group_size + 6*ker_data->NxNyNz;     //12*group_size because d_psi needs 3 Scalar4 per particle, 6*NxNyNz because 3 complex values per grid point
+  float *d_gauss = work_data->bro_gauss;
+  unsigned int N_random = 11*group_size + 6*ker_data->NxNyNz;     //11N for real, 6NxNyNz for imaginary
   //curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_DEFAULT);       //the default generator (xorwow)
   //curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_MT19937);       //too slow
   //curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_MTGP32);        //fast
@@ -940,8 +873,8 @@ void Brownian_FarField_SlipVelocity(float *d_Uslip_ff,
   curandGenerateNormal(gen, d_gauss, N_random, 0.0f, 1.0f);       //mean 0, std 1
   curandDestroyGenerator(gen);  
 
-  //the first 12N floats goes to d_psi (this takes care of the type difference)
-  cudaMemcpy(d_psi, d_gauss, 12*group_size*sizeof(float), cudaMemcpyDeviceToDevice);  
+  ////the first 11N floats goes to d_psi (this takes care of the type difference)
+  //cudaMemcpy(d_psi, d_gauss, 11*group_size*sizeof(float), cudaMemcpyDeviceToDevice);  
 
 
   
@@ -977,12 +910,12 @@ void Brownian_FarField_SlipVelocity(float *d_Uslip_ff,
   Mobility_ZeroGrid_kernel<<<gridNBlock,gridBlockSize>>>( mob_data->gridZX, ker_data->NxNyNz );
   Mobility_ZeroGrid_kernel<<<gridNBlock,gridBlockSize>>>( mob_data->gridZY, ker_data->NxNyNz );
 		
-  // Apply random fluctuation to wave space grid (zhoge: only contains force, no torque or stress)
-  Brownian_FarField_RNG_Grid1of2_kernel<<<gridNBlock,gridBlockSize>>>(mob_data->gridX,
-  								      mob_data->gridY,
-  								      mob_data->gridZ,
+  // Apply random fluctuation to wave space grid (zhoge: fluctuation of the force density)
+  Brownian_FarField_RNG_Grid1of2_kernel<<<gridNBlock,gridBlockSize>>>(mob_data->gridX,  //output
+  								      mob_data->gridY,	//output
+  								      mob_data->gridZ,	//output
   								      mob_data->gridk,
-  								      &d_gauss[12*group_size], //zhoge: pre-generated Gaussian
+  								      &d_gauss[11*group_size], //zhoge: pre-generated Gaussian
   								      ker_data->NxNyNz,
   								      mob_data->Nx,
   								      mob_data->Ny,
@@ -992,9 +925,9 @@ void Brownian_FarField_SlipVelocity(float *d_Uslip_ff,
   								      dt,
   								      quadW);
   
-  Brownian_FarField_RNG_Grid2of2_kernel<<<gridNBlock,gridBlockSize>>>(mob_data->gridX,  //output
-  								      mob_data->gridY,	//output
-  								      mob_data->gridZ,	//output
+  Brownian_FarField_RNG_Grid2of2_kernel<<<gridNBlock,gridBlockSize>>>(mob_data->gridX,  //input/output
+  								      mob_data->gridY,	//input/output
+  								      mob_data->gridZ,	//input/output
   								      mob_data->gridXX,	//output
   								      mob_data->gridXY,	//output
   								      mob_data->gridXZ,	//output
@@ -1004,14 +937,7 @@ void Brownian_FarField_SlipVelocity(float *d_Uslip_ff,
   								      mob_data->gridZX,	//output
   								      mob_data->gridZY,	//output
   								      mob_data->gridk,
-  								      ker_data->NxNyNz,
-  								      mob_data->Nx,
-  								      mob_data->Ny,
-  								      mob_data->Nz,
-  								      bro_data->seed_ff_ws,
-  								      bro_data->T,
-  								      dt,
-  								      quadW);
+  								      ker_data->NxNyNz);
   		
   // Return rescaled forces to real space
   cufftExecC2C( mob_data->plan, mob_data->gridX,  mob_data->gridX,  CUFFT_INVERSE);
@@ -1077,31 +1003,38 @@ void Brownian_FarField_SlipVelocity(float *d_Uslip_ff,
   // ***************
   // Real Space Part
   // ***************
+  
+  //zhoge: Apply the Chow & Saad method to sample the far-field velocity (real part)
+  Scalar *d_UB1 = work_data->bro_ff_UB_new1;
 
-  // Compute the square root
-  Brownian_FarField_Lanczos(d_psi,  //input
-  			    d_pos,  //input
-  			    d_group_members,
-  			    group_size,
-  			    box,
-  			    dt,
-  			    d_Mreal12psi,  //output (11N vector of generalized velocity)
-  			    bro_data->T,
-  			    mob_data->xi,
-  			    mob_data->ewald_cut,
-  			    mob_data->ewald_dr,
-  			    mob_data->ewald_n,
-  			    mob_data->ewald_table, 
-  			    mob_data->nneigh,
-  			    mob_data->nlist,
-  			    mob_data->headlist,
-  			    bro_data->m_Lanczos_ff,  //input/output
-  			    bro_data->tol,
-  			    ker_data->particle_grid,
-  			    ker_data->particle_threads,
-  			    mob_data->gridh,
-  			    mob_data->self,
-  			    work_data);  //zhoge: work_data->mob_delu is modified inside (!!)
+  Brownian_FarField_Chow_Saad( d_UB1,    //output
+  			       d_gauss,  //input (use d_gauss because of cublas)
+  			       d_pos,
+  			       d_group_members,
+  			       group_size,
+  			       box,
+  			       dt,
+  			       //pBuffer,
+  			       ker_data,
+  			       bro_data,
+  			       //res_data,
+  			       mob_data,
+  			       work_data);  //zhoge: work_data->mob_delu is modified inside (!!)
+
+  // Convert type again to conform with the old implementation (be careful with the zeros)
+  Type_conversion_Append_zero_kernel<<<grid,threads>>>( d_UB1,        //input (the first 3N floats)
+							d_Mreal12psi, //output (the first N Scalar4's)
+							group_size );
+  // if input 6N Gaussians
+  //Type_conversion_Append_five_zeros_kernel<<<grid,threads>>>( &d_UB1[3*group_size],       //input (the next 3N floats)
+  //							      &d_Mreal12psi[group_size],  //output (the next 2N Scalar4's)
+  //							      group_size );
+  // if input 11N Gaussians
+  cudaMemcpy( &d_Mreal12psi[group_size], &d_UB1[3*group_size], 2*group_size*sizeof(Scalar4), cudaMemcpyDeviceToDevice );
+  // End new Chow & Saad
+
+  
+  
   		
   // Add to wave space part
   Mobility_LinearCombination_kernel<<<grid, threads>>>( d_Mreal12psi, //input  (real)
@@ -1119,22 +1052,10 @@ void Brownian_FarField_SlipVelocity(float *d_Uslip_ff,
   					   1.0,     //wave coefficient
   					   group_size );
   	
-
-  // ****************
   // Rearrange Output
-  // ****************
   Saddle_MakeGeneralizedU_kernel<<<grid,threads>>>(d_Uslip_ff, //output
 						   d_vel,  
-						   d_delu, //angular velocity and rate of strain
+						   d_delu,
 						   group_size);
-	
-  // ********
-  // Clean Up
-  // ********
-  
-  d_vel = NULL;
-  d_delu = NULL;
-  d_Mreal12psi = NULL;
-  d_psi = NULL;
 
 }

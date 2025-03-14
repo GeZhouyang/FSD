@@ -1,11 +1,11 @@
 ## Fast Stokesian Dynamics (FSD)
 
-Original authors: Andrew M. Fiore & James W. Swan (MIT)
+Original authors: Andrew M. Fiore & James W. Swan (MIT) [1].
 
->  Note: The original FSD code contains some errors in the lubrication, mobility and Brownian calculations.
->  Also, there was a bug causing memory leaks in the preconditioner.
+>  Note: The original FSD code contains errors in the lubrication, mobility, precondition and Brownian calculations.
 >  This version fixes those issues and tries to improve the overall performance and clarity.
->  However, there could always be more bugs, so if you found any please do not hesitate to contact me.
+>  Furthermore, the solver has been adapted to simulate active suspensions of squirmers based on the *Active Stokesian Dynamics* framework, 
+>  see Refs. [2-3] for details.
 
 A brief summary of the main files is given below. Main structure:
 
@@ -38,14 +38,16 @@ Auxiliary functions:
 >	- Helper_Brownian.cu		: Helper functions used in Brownian_FarField.cu and Brownian_NearField.cu
 >	- Helper_Debug.cu		    : Functions for debugging and code checking, printing output, etc.
 
-An *active* version of the solver for simulations of suspensions of squirmers is provided in the branch `squirmer`.
-The implementation is based on the *Active Stokesian Dynamics* framework 
-and is backward compatible with the original FSD for passive suspensions.
+Despite our effort to verify the solver and reduce the number of mistakes, there could always be more bugs. 
+So, if you found any please do not hesitate to contact me.
 
-> Note: Brownian motion is not fully validated. At least it should not be used with the implemented RK2 scheme.
+### Acknowledgements
+
+I would like to thank Boyuan Chen (Caltech) for extensive help in debugging the code. 
+I would also like to thank William Torre (Utrecht) for discussions about the solver.
 
 ### Reference
 
-> Fiore, A. M., & Swan, J. W. (2019). Fast Stokesian dynamics. *Journal of Fluid Mechanics*, 878, 544-597.
-> Elfring, G. J., & Brady, J. F. (2022). Active stokesian dynamics. *Journal of Fluid Mechanics*, 952, A19.
-> Ge, Z., & Elfring, G. J. (2025). Hydrodynamic diffusion in apolar active suspensions of squirmers. *Journal of Fluid Mechanics*, 1003, A17.
+1. Fiore, A. M., & Swan, J. W. (2019). [Fast Stokesian dynamics](https://www.cambridge.org/core/journals/journal-of-fluid-mechanics/article/abs/fast-stokesian-dynamics/970BD1B80B43E21CD355C7BAD4644D46). *Journal of Fluid Mechanics*, 878, 544-597.
+2. Elfring, G. J., & Brady, J. F. (2022). [Active Stokesian dynamics](https://www.cambridge.org/core/journals/journal-of-fluid-mechanics/article/active-stokesian-dynamics/4FAE47B1A6F0531AE9B6C8F1EAC6D95C). *Journal of Fluid Mechanics*, 952, A19.
+3. Ge, Z., & Elfring, G. J. (2025). [Hydrodynamic diffusion in apolar active suspensions of squirmers](https://www.cambridge.org/core/journals/journal-of-fluid-mechanics/article/hydrodynamic-diffusion-in-apolar-active-suspensions-of-squirmers/8596439F68F3E3D6B5A194EB005E992A). *Journal of Fluid Mechanics*, 1003, A17.

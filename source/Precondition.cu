@@ -1139,8 +1139,7 @@ void Precondition_IChol(
 			){
 		
 	// 1. Incomplete Cholesky decomposition for the preconditioner needs to 
-	//    be performed on ( RFUnf + I ), so add Identity to the matrix
-        // zhoge: Already added in Precondition_Wrap(), isn't it???
+	//    be performed on ( RFUnf + relaxer*I ), so add Identity to the matrix
 	Precondition_AddIdentity_kernel<<<grid,threads>>>(
 								d_L_Val,
 								d_L_RowPtr,
@@ -1250,7 +1249,7 @@ void Precondition_IChol(
 		exit(1);
         }
 		
-        // 5. Perform incomplete Cholesky decomposition, (RFUnf + I) = L * L'
+        // 5. Perform incomplete Cholesky decomposition, (RFUnf + relaxer*I) = L * L'
 	//
 	spStatus = cusparseScsric02(
 					spHandle,
@@ -1310,7 +1309,11 @@ void Precondition_IChol(
 /*
 	Wrapper for all the functions required to build the preconditioner, in the proper order
 
-	zhoge: I would say this function does S = L*L^T, where S = R_FU^nf + I, L is a lower Cholesky factor.
+	zhoge: It mainly does S = L * L^T, where S = P * (R_FU^nf + relaxer*I) * P^T, 
+               R_FU^nf is the pruned near-field RFU,
+               relaxer is in powers of 2 (starting from 1), 
+               P is the RCM permutation matrix (P^T its inverse),
+               and L is a lower incomplete Cholesky factor (L^T its upper factor).
 
 	d_pos			(input)		particle positions
 	d_group_members		(input)		indices for particles in the integration group
@@ -1353,7 +1356,7 @@ void Precondition_Wrap(
 					d_group_members,
 					group_size, 
 				      	box,
-					res_data,
+					res_data,  //output
 					ker_data
 					);
 	
@@ -1399,9 +1402,10 @@ void Precondition_Wrap(
 				);
 	
 	// Re-order the lubrication tensor (R_FU^nf) using RCM (using an implementation in rcm.cpp)
+	// zhoge: Should result P * (R_FU^nf) * P^T
 	Precondition_Reorder(
 				group_size, 
-				res_data->prcm,                   //output
+				res_data->prcm,                   //output (the permutation)
 				res_data->nnz,
 				res_data->headlist_pruned,
 				res_data->nlist_pruned,
@@ -1419,14 +1423,13 @@ void Precondition_Wrap(
 				work_data->precond_map
 				);
 	
-	// Get the diagonal elements (zhoge: It's not simply "get", see its definition in Helper_Precondition.cu)
-	// (Related to Brownian calculations.)
+	// Get the inverse square root of the diagonal elements (related to near-field Brownian calculations)
 	Precondition_GetDiags_kernel<<< grid, threads >>>(
 								group_size, 
 								res_data->Diag,     //output
-								res_data->L_RowPtr,
-								res_data->L_ColInd,
-								res_data->L_Val
+								res_data->L_RowPtr, //input
+								res_data->L_ColInd, //input
+								res_data->L_Val	    //input
 								);
 	/* //zhoge: redundent (done in IChol below)
 	// Add far-field contribution to the diagonal, i.e. S = R_FU^nf + ichol_relaxer*(1 or 4/3)
@@ -1496,12 +1499,15 @@ void Precondition_Wrap(
 /*
 	Preconditioned RFU multiply for the Brownian calculation. 
 
-		y = G^(-1) * D^(-1) * P * ( RFUnf + Inn ) * P^(T) * D^(-1) * G^(-T)
+		y = L^(-1) * D^(-1) * P * ( R_FU^nf + I_nn ) * P^(T) * D^(-T) * L^(-T) * x
 
-		G   = Lower Cholesky factor of ( RFU + I )
-		D   = Modified diagonal elements of RFU
+		L   = Lower Cholesky factor of ( \tilde R_FU^nf + I )
+		D   = Modified diagonal elements of R_FU
 		P   = RCM re-ordering
-		Inn = modified identity tensor
+		I_nn = modified identity tensor (non-zero only if no neighbor)
+
+	zhoge: The order of D and P is inconsistent with the FSD paper, 
+               but it is correct because D was obtained from the permutated RFU.
 
 	!!! CAN work with in-place solve (i.e. pointers d_x = d_y)
 
@@ -1531,57 +1537,121 @@ void Precondition_Brownian_RFUmultiply(
 	dim3 grid    = (ker_data->particle_grid);
 	dim3 threads = (ker_data->particle_threads);
 
-	// Pointer to scratch array
+	// Pointer to scratch array (size 6N, same as d_x and d_y)
 	float *d_z = (res_data->Scratch1);
-
+	
 	// Number of elements of the arrays
 	int numel = 6 * group_size;
-
+	
 	// Variable required for Axpy
 	float spAlpha = 1.0;
 	
-	// First incomplete Cholesky Solve: solve L'*y = x
-	cusparseScsrsv2_solve(
-				res_data->spHandle, 
-				res_data->trans_Lt, 
-				numel, 
-				res_data->nnz, 
-				&spAlpha, 
-				res_data->descr_L,
-	   			res_data->L_Val, 
-				res_data->L_RowPtr, 
-				res_data->L_ColInd, 
-				res_data->info_Lt,
-	   			d_x, // input
-				d_y, // output
-				res_data->policy_Lt, 
-				pBuffer
-				);
-	
-	// Diagonal multiplication
-	Precondition_DiagMult_kernel<<< grid, threads >>>(
-								d_z, // output
-								d_y, // input
-								group_size, 
-								res_data->Diag,
-								1
-								);
-	
-	// Permute the input vector
-	Precondition_ApplyRCM_Vector_kernel<<<grid,threads>>>( 
-								d_y, // output
-								d_z, // input
-								res_data->prcm,
-								group_size,
-								-1
-								);
-	
-	// RFU multiplication and addition of Inn
 	//
-	// d_z = ( RFU + Inn ) * d_y
+	//// First incomplete Cholesky Solve: solve L'*y = x
+	//cusparseScsrsv2_solve(
+	//			res_data->spHandle, 
+	//			res_data->trans_Lt, 
+	//			numel, 
+	//			res_data->nnz, 
+	//			&spAlpha, 
+	//			res_data->descr_L,
+	//   			res_data->L_Val, 
+	//			res_data->L_RowPtr, 
+	//			res_data->L_ColInd, 
+	//			res_data->info_Lt,
+	//   			d_x, // input
+	//			d_y, // output
+	//			res_data->policy_Lt, 
+	//			pBuffer
+	//			);
+	//
+	//// Diagonal multiplication (zhoge: Actually dividing the diagonal elements by their square roots)
+	//Precondition_DiagMult_kernel<<< grid, threads >>>(
+	//							d_z, // output
+	//							d_y, // input
+	//							group_size, 
+	//							res_data->Diag,  //input
+	//							1
+	//							);
+	//
+	//// Permute the input vector (zhoge: Undo the RCM permutation given -1)
+	//Precondition_ApplyRCM_Vector_kernel<<<grid,threads>>>( 
+	//							d_y, // output
+	//							d_z, // input
+	//							res_data->prcm,
+	//							group_size,
+	//							-1
+	//							);
+	//
+	//// RFU multiplication and addition of Inn
+	////
+	//// d_z = RFU * d_y
+	//Lubrication_RFU_kernel<<< grid, threads >>>(
+	//					        d_z, // output (intermediate)
+	//						d_y, // input
+	//						d_pos,
+	//						d_group_members,
+	//						group_size, 
+	//		      				box,
+	//						res_data->nneigh, 
+	//						res_data->nlist, 
+	//						res_data->headlist, 
+	//						res_data->table_dist,
+	//						res_data->table_vals,
+	//						res_data->table_min,
+	//						res_data->table_dr,
+	//						res_data->rlub
+	//						);
+	//// d_z += Inn * d_y
+	//Precondition_Inn_kernel<<< grid, threads >>>(
+	//						d_z, // input/output (overwritten)
+	//						d_y, // input
+	//						res_data->HasNeigh,
+	//						group_size
+	//						);
+	//
+	//// Permute the output vector (zhoge: Apply the RCM given 1)
+	//Precondition_ApplyRCM_Vector_kernel<<<grid,threads>>>( 
+	//						        d_y, // output
+	//							d_z, // input
+	//							res_data->prcm,
+	//							group_size,
+	//							1
+	//							);
+	//
+	//// Diagonal multiplication (zhoge: Divide again, now the diagonals are 1 if they were between 0 and 1)
+	//Precondition_DiagMult_kernel<<< grid, threads >>>(
+	//							d_z, // output
+	//							d_y, // input
+	//							group_size, 
+	//							res_data->Diag,
+	//							1
+	//							);
+	//
+	//// Second incomplete Cholesky solve: solve L*y = x
+	//cusparseScsrsv2_solve(
+	//			res_data->spHandle, 
+	//			res_data->trans_L, 
+	//			numel, 
+	//			res_data->nnz, 
+	//			&spAlpha, 
+	//			res_data->descr_L,
+	//   			res_data->L_Val, 
+	//			res_data->L_RowPtr, 
+	//			res_data->L_ColInd, 
+	//			res_data->info_L,
+	//   			d_z, // input 
+	//			d_y, // output
+	//			res_data->policy_L, 
+	//			pBuffer
+	//			);
+	//
+	
+	//debug: effectively turn off the preconditioner
+	// d_y = RFU * d_x
 	Lubrication_RFU_kernel<<< grid, threads >>>(
-							d_z, // output
-							d_y, // input
+						        d_y, // output
+							d_x, // input
 							d_pos,
 							d_group_members,
 							group_size, 
@@ -1596,49 +1666,8 @@ void Precondition_Brownian_RFUmultiply(
 							res_data->rlub
 							);
 
-	Precondition_Inn_kernel<<< grid, threads >>>(
-							d_z, // output
-							d_y, // input
-							res_data->HasNeigh,
-							group_size
-							);
-	
-	// Permute the output vector
-	Precondition_ApplyRCM_Vector_kernel<<<grid,threads>>>( 
-								d_y, // output
-								d_z, // input
-								res_data->prcm,
-								group_size,
-								1
-								);
-	
-	// Diagonal multiplication
-	Precondition_DiagMult_kernel<<< grid, threads >>>(
-								d_z, // output
-								d_y, // input
-								group_size, 
-								res_data->Diag,
-								1
-								);
-	
-	// Second incomplete Cholesky solve: solve L*y = x
-	cusparseScsrsv2_solve(
-				res_data->spHandle, 
-				res_data->trans_L, 
-				numel, 
-				res_data->nnz, 
-				&spAlpha, 
-				res_data->descr_L,
-	   			res_data->L_Val, 
-				res_data->L_RowPtr, 
-				res_data->L_ColInd, 
-				res_data->info_L,
-	   			d_z, // input 
-				d_y, // output
-				res_data->policy_L, 
-				pBuffer
-				);
 
+	
 	// Clean up
 	d_z = NULL;
 
@@ -1654,6 +1683,8 @@ void Precondition_Brownian_RFUmultiply(
 		D   = modified diagonal matrix
 		P   = RCM re-ordering matrix
 		Inn = modified identity tensor
+
+	zhoge: Again, D and P^T are flipped relative to the FSD paper, but it is self-consistent in the code.
 
 	!!! Works in-place
 
@@ -1699,19 +1730,19 @@ void Precondition_Brownian_Undo(
                         d_z  // Output
                         );
 
-	// Diagonal preconditioner
+	// Diagonal preconditioner (zhoge: Multiply the square root given -1, confusing notation but correct)
 	Precondition_DiagMult_kernel<<< grid, threads >>>(
 								d_x,  // output
 								d_z,  // input
 								group_size, 
 								res_data->Diag,
-								-1
+								-1 
 								);
 	
-	// Permute the output vector
+	// Permute the output vector (zhoge: Actually undo the RCM permutation given -1)
 	Precondition_ApplyRCM_Vector_kernel<<< grid, threads >>>( 
-									d_z, // output
-									d_x, // input
+								 	d_z, // output
+								        d_x, // input
 									res_data->prcm,
 									group_size,
 									-1

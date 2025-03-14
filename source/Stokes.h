@@ -53,7 +53,9 @@ public:
 		Scalar error,
 		std::string fileprefix,
 		int period,
-		Scalar ndsr, Scalar kappa, Scalar k_n, Scalar beta_AF, Scalar epsq  //zhoge
+		Scalar ndsr, Scalar kappa, Scalar k_n, Scalar beta_AF, Scalar epsq, Scalar sqm_B1, Scalar sqm_B2,
+		unsigned int N_mix, Scalar coef_B1_mask, Scalar coef_B2_mask,
+		Scalar rot_diff, Scalar T_ext, Scalar omega_ext  //zhoge
 		);
 
   virtual ~Stokes();
@@ -168,6 +170,17 @@ protected:
   Scalar m_k_n;    // collision spring constant (zhoge)
   Scalar m_beta;   // ratio of Hamaker constant and electrostatic force scale
   Scalar m_epsq;   // square root of the regularization term for vdW
+  Scalar m_sqm_B1; // coef for the B1 mode of spherical squirmers
+  Scalar m_sqm_B2; // coef for the B2 mode of spherical squirmers
+  unsigned int m_N_mix;  // number of particles in the first group (when having a mixture)
+  Scalar m_coef_B1_mask; // coef for the B1 mask of spherical squirmers
+  Scalar m_coef_B2_mask; // coef for the B2 mask of spherical squirmers
+  GPUArray<float> m_sqm_B1_mask; // mask array for B1
+  GPUArray<float> m_sqm_B2_mask; // mask array for B2
+  GPUArray<Scalar3> m_noise_ang; // Gaussian noise for the angular velocity
+  Scalar m_rot_diff;  // rotational diffusion coef due to noise
+  Scalar m_T_ext;     // external torque
+  Scalar m_omega_ext; // external torque angular frequency
 
   // ******************************************************************
   // Declare all variables for physical quantities (forces, velocities)
@@ -228,35 +241,39 @@ protected:
 		
   std::string m_fileprefix;	//!< output file prefix
   int m_period;			//!< frequency with which to write output files
-
-  cublasHandle_t blasHandle;	//!< opaque handle for cuBLAS operations
 	
   // *********************************************************************************
   // Work space variables for all calculations
   // *********************************************************************************
 
+  cublasHandle_t blasHandle;	//!< opaque handle for cuBLAS operations
+
+  
   // Dot product partial sum
   Scalar *dot_sum;
-
+  float  *m_work_bro_gauss;  //zhoge: Gaussian random variables (type float for cuRand)
+  
   // Variables for far-field Lanczos iteration
   Scalar4 *m_work_bro_ff_psi;
-  float *m_work_bro_gauss;  //zhoge: Gaussian random variables (type float for cuRand)
   Scalar4 *m_work_bro_ff_UBreal;
-  Scalar  *m_work_bro_ff_Tm;
-  Scalar4 *m_work_bro_ff_v;
-  Scalar4 *m_work_bro_ff_vj;
-  Scalar4 *m_work_bro_ff_vjm1;
-  Scalar4 *m_work_bro_ff_Mvj;
-  Scalar4 *m_work_bro_ff_V;
-  Scalar4 *m_work_bro_ff_UB_old;
   Scalar4 *m_work_bro_ff_Mpsi;
+  //zhoge
+  Scalar *m_work_bro_ff_V1;
+  Scalar *m_work_bro_ff_UB_new1;
+  Scalar *m_work_bro_ff_UB_old1;
 
-  // Variables for near-field Lanczos iteration	
+  Scalar  *m_work_rfd_rhs;
+  Scalar  *m_work_rfd_sol;
+  
+  Scalar4  *m_work_pos_rk1;
+  Scalar3  *m_work_ori_rk1;
+
+  
+  // Variables for near-field Lanczos iteration  
   Scalar *m_work_bro_nf_Tm;
-  Scalar *m_work_bro_nf_v;
   Scalar *m_work_bro_nf_V;
   Scalar *m_work_bro_nf_FB_old;
-  Scalar *m_work_bro_nf_Psi;
+  Scalar *m_work_bro_nf_psi;
 
   Scalar  *m_work_saddle_psi;
   Scalar4 *m_work_saddle_posPrime;

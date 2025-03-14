@@ -55,6 +55,10 @@ struct BrownianData
 	float T;	//!< Temperature
 
 	float rfd_epsilon;	//!< epsilon for RFD approximation
+
+  Scalar  *rfd_rhs;       //!< (DEVICE) RFD right-hand side 
+  Scalar  *rfd_sol;       //!< (DEVICE) RFD solution vector
+
 };
 
 //! Declare a structure to hold all of the mobility calculation information
@@ -153,7 +157,6 @@ struct ResistanceData
 	float ichol_relaxer;	//!< magnitude of term to add to diagonal for IChol
 	bool ichol_converged;	//!< flag for whether the incomplete Cholesky converged
 
-	cublasHandle_t blasHandle;	//!< Opaque handle for cuBLAS operations
 
   // Interparticle force parameters
   float m_ndsr;      //non-dimensional shear rate                       
@@ -161,35 +164,40 @@ struct ResistanceData
   float m_kappa;     //inverse Debye length for electrostatic repulsion 
   float m_beta;      // ratio of Hamaker constant and electrostatic force scale
   float m_epsq;      // square root of the regularization term for vdW
-  
+//  float m_sqm_B1;    // coef for the B1 mode of spherical squirmers
+//  float m_sqm_B2;    // coef for the B2 mode of spherical squirmers
+
 };
 
 //! Declare a structure to hold work spaces required throughout the calculations
 struct WorkData
 {
 
+  cublasHandle_t blasHandle;	//!< Opaque handle for cuBLAS operations  //zhoge: was in res_data
+
+  //zhoge: RK2 midstep storage
+  Scalar4 *pos_rk1;
+  Scalar3 *ori_rk1;
+  
 	// Dot product partial sum
 	Scalar *dot_sum; 	//!< Partial dot product sum
+        float *bro_gauss;   //zhoge: Gaussian random variables
 
 	// Variables for far-field Lanczos iteration	
 	Scalar4 *bro_ff_psi;	//!< (DEVICE) random vector for far-field real space
-	float *bro_gauss;	//zhoge: Gaussian random variables
 	Scalar4 *bro_ff_UBreal;	//!< (DEVICE) real space far-field Brownian displacement
-	Scalar  *bro_ff_Tm;	//!< (DEVICE) Tri-diagonal matrix for square root calculation
-	Scalar4 *bro_ff_v;	//!< (DEVICE) Vector for Lanczos iterations
-	Scalar4 *bro_ff_vj;	//!< (DEVICE) Vector for Lanczos iterations
-	Scalar4 *bro_ff_vjm1;	//!< (DEVICE) Vector for Lanczos iterations
-	Scalar4 *bro_ff_Mvj;	//!< (DEVICE) Vector for Lanczos iterations
-	Scalar4 *bro_ff_V;	//!< (DEVICE) Basis vectors for Lanczos iteration
-	Scalar4 *bro_ff_UB_old;	//!< (DEVICE) Old value of displacement
 	Scalar4 *bro_ff_Mpsi;	//!< (DEVICE) Product of mobility with the random vector
 
+  //zhoge: re-implement ff Chow & Saad
+  Scalar *bro_ff_V1;	        //!< (DEVICE) Basis vectors for Lanczos iteration
+  Scalar *bro_ff_UB_new1;	//!< (DEVICE) Old value of displacement
+  Scalar *bro_ff_UB_old1;	//!< (DEVICE) Old value of displacement
+  
 	// Variables for near-field Lanczos iteration	
 	Scalar *bro_nf_Tm;	//!< (DEVICE) Tri-diagonal matrix for square root calculation
-	Scalar *bro_nf_v;	//!< (DEVICE) Vector for Lanczos iterations
 	Scalar *bro_nf_V;	//!< (DEVICE) Basis vectors for Lanczos iteration
 	Scalar *bro_nf_FB_old;	//!< (DEVICE) Old value of displacement
-	Scalar *bro_nf_psi;	//!< (DEVICE) Random vector for near-field Brownian calculation
+        Scalar *bro_nf_psi;	//!< (DEVICE) Random vector for near-field Brownian calculation
 
 	Scalar  *saddle_psi;		//!< (DEVICE) Random vector for RFD
 	Scalar4 *saddle_posPrime;       //!< (DEVICE) Displaced position for RFD
