@@ -3,14 +3,16 @@
 Original authors: Andrew M. Fiore & James W. Swan (MIT) [1].
 
 >  Note: The original FSD code contains errors in the lubrication, mobility, precondition and Brownian calculations.
->  This version fixes those issues and tries to improve the overall performance and clarity.
->  Furthermore, the solver has been adapted to simulate active suspensions of squirmers based on the *Active Stokesian Dynamics* framework, 
->  see Refs. [2-3] for details.
+>  This version tries to fix those issues and improve the overall performance and clarity.
+>  Furthermore, the solver has been adapted to simulate active matter based on the *Active Stokesian Dynamics* framework [2]. 
+>  Some recent publications using data generated from this solver is listed in [3-5].
+>  Feel free to let me know if you used our code and would like your paper to be listed here.
 
 A brief summary of the main files is given below. Main structure:
 
+>   - DataStruct.h              : Declaration of the various data structures
 >	- Stokes.cc			        : C++ module to set up the method and run the integrator
->	- Stokes.cu			        : Driver function for integration (RK2, Euler-Maruyama, etc.)
+>	- Stokes.cu			        : Driver function for the velocity calculation and temporal integration
 >	- Precondition.cu		    : Preconditioners for the saddle point and near-field Brownian solves
 >	- Integrator.cu			    : Velocity computation and integrators, including the RFD
 >	- Solvers.cu			    : Methods to perform required matrix inversions
@@ -22,6 +24,7 @@ Deterministic hydrodynamics:
 >	- Mobility.cu			    : Far-field mobility calculations
 >	- Lubrication.cu		    : Near-field resistance (lubrication) functions (RFU, RFE, RSU, RSE)
 >	- Stokes_ResistanceTable.cc	: Values for pre-computed tabulation of lubrication functions
+>	- Stokes_SparseMath.cc   	: Setup of the cuSparse operations (triangular solve, Cholesky, etc)
 
 Brownian motion:
 
@@ -38,8 +41,17 @@ Auxiliary functions:
 >	- Helper_Brownian.cu		: Helper functions used in Brownian_FarField.cu and Brownian_NearField.cu
 >	- Helper_Debug.cu		    : Functions for debugging and code checking, printing output, etc.
 
+### How to install
+
+Detailed instructions can be found in the supplemental material of Andrew's JFM [1],
+which still applies to the current version.
+We are working on upgrading the codebase to the latest toolchains,
+and will update the source code when ready.
+
+### Disclaimer
+
 Despite our effort to verify the solver and reduce the number of mistakes, there could always be more bugs. 
-So, if you found any please do not hesitate to contact me.
+So, if you found any please do not hesitate to contact us.
 
 ### Acknowledgements
 
@@ -48,6 +60,8 @@ I would also like to thank William Torre (Utrecht) for discussions about the sol
 
 ### Reference
 
-1. Fiore, A. M., & Swan, J. W. (2019). [Fast Stokesian dynamics](https://www.cambridge.org/core/journals/journal-of-fluid-mechanics/article/abs/fast-stokesian-dynamics/970BD1B80B43E21CD355C7BAD4644D46). *Journal of Fluid Mechanics*, 878, 544-597.
-2. Elfring, G. J., & Brady, J. F. (2022). [Active Stokesian dynamics](https://www.cambridge.org/core/journals/journal-of-fluid-mechanics/article/active-stokesian-dynamics/4FAE47B1A6F0531AE9B6C8F1EAC6D95C). *Journal of Fluid Mechanics*, 952, A19.
-3. Ge, Z., & Elfring, G. J. (2025). [Hydrodynamic diffusion in apolar active suspensions of squirmers](https://www.cambridge.org/core/journals/journal-of-fluid-mechanics/article/hydrodynamic-diffusion-in-apolar-active-suspensions-of-squirmers/8596439F68F3E3D6B5A194EB005E992A). *Journal of Fluid Mechanics*, 1003, A17.
+1. Fiore & Swan (2019). [Fast Stokesian dynamics](https://doi.org/10.1017/jfm.2019.640). *Journal of Fluid Mechanics*, 878, 544-597.
+2. Elfring & Brady (2022). [Active Stokesian dynamics](https://doi.org/10.1017/jfm.2022.909). *Journal of Fluid Mechanics*, 952, A19.
+3. Ge & Elfring (2022). [Rheology of periodically sheared suspensions undergoing reversible-irreversible transition](https://doi.org/10.1103/PhysRevE.106.054616). *Journal of Fluid Mechanics*, 1003, A17.
+4. Ge & Elfring (2025). [Hydrodynamic diffusion in apolar active suspensions of squirmers](https://doi.org/10.1017/jfm.2024.1071). *Journal of Fluid Mechanics*, 1003, A17.
+5. Ge, Brady & Elfring (2025). [Nonmonotonic diffusion in sheared active suspensions of squirmers](https://apps.crossref.org/pendingpub/pendingpub.html?doi=10.1103%2F54qq-1s51). To appear in *Physical Review Letters*.

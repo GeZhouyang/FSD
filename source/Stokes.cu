@@ -200,12 +200,6 @@ cudaError_t Stokes_StepOne(     unsigned int timestep,
 			  res_data,
 			  work_data);
 
-//	Debug_Lattice_SpinViscosity(mob_data,res_data,ker_data,work_data,d_pos,d_group_members,group_size,box);
-//	Debug_Lattice_ShearViscosity(mob_data,res_data,ker_data,work_data,d_pos,d_group_members,group_size,box);
-//	cudaUnbindTexture(tables1_tex);
-//	gpuErrchk(cudaPeekAtLastError());
-//	return cudaSuccess;
-
 
 	// *******************************************************
         // Solve the hydrodynamic problem and do the integration
@@ -250,123 +244,23 @@ cudaError_t Stokes_StepOne(     unsigned int timestep,
 				   res_data,	 
 				   work_data);
 
-	if ( bro_data->T > 0.0 or rot_diff > 0.0 )  //Euler-Maruyama for stochastic simulations
-	  {
-	    // Make the displacement
-	    Integrator_ExplicitEuler_Shear_kernel<<<grid,threads>>>(d_pos,     //input
-								    d_ori,     //input	
-								    d_pos,     //output (overwrite)
-								    d_ori,     //output (overwrite)
-								    d_pos_gb,  //input/output global position (updated)
-								    d_Velocity,
-								    sqm_B1,
-								    d_sqm_B1_mask,
-								    d_noise_ang,
-								    d_image,
-								    d_group_members,
-								    group_size,
-								    box,
-								    dt,
-								    shear_rate
-								    );
-	  }
-	else  //Runge-Kutta for deterministic simulations
-	  {
-	    // RK position storage
-	    Scalar4 *pos_rk1 = work_data->pos_rk1;
-	    Scalar3 *ori_rk1 = work_data->ori_rk1;
-
-	    // Make an intermediate displacement
-	    Integrator_ExplicitEuler1_Shear_kernel<<<grid,threads>>>(d_pos,     //input
-								     d_ori,     //input	
-								     pos_rk1,   //output
-								     ori_rk1,   //output
-								     d_pos_gb,  //input/output global position (updated)
-								     d_Velocity,
-								     sqm_B1,
-								     d_sqm_B1_mask,
-								     d_noise_ang,
-								     d_image,
-								     d_group_members,
-								     group_size,
-								     box,
-								     dt,
-								     shear_rate
-								     );
-	  
-	
-	    // second RK step
-	
-	    // zhoge: Probably no need to precondition again
-	    Precondition_Wrap(pos_rk1,           
-			      d_group_members, 
-			      group_size,	   
-			      box,		   
-			      ker_data,	   
-			      res_data,	   //input/output (pruned neighbor list)
-			      work_data);
-	
-	    // Get the midstep interparticle force
-	    Stokes_SetForce_manually_kernel<<<grid,threads>>>(
-							      pos_rk1,         //input
-							      ori_rk1,         //input
-							      d_AppliedForce,  //output
-							      group_size,
-							      d_group_members,
-							      res_data->nneigh, 
-							      res_data->nlist, 
-							      res_data->headlist,
-							      res_data->m_ndsr,
-							      res_data->m_k_n, 
-							      res_data->m_kappa,
-							      res_data->m_beta, 
-							      res_data->m_epsq,
-							      T_ext,
-							      box
-							      );
-	
-	    // Compute particle velocities from central RFD + Saddle point solve (in Integrator.cu)
-	    Integrator_ComputeVelocity(timestep, output_period,
-				       d_AppliedForce,  
-				       d_Velocity,      //output (FSD velocity and stresslet, 11N)
-				       dt/2.,		 
-				       shear_rate,	 
-				       pos_rk1,         //input position
-				       sqm_B2,
-				       d_sqm_B2_mask, 
-				       ori_rk1,         //input orientation
-				       d_image,	 
-				       d_group_members, 
-				       group_size,	 
-				       box,		 
-				       ker_data,	 
-				       bro_data,	 
-				       mob_data,	 
-				       res_data,	 
-				       work_data);
-	
-	    // Make the final displacement
-	    Scalar coef_1 = 0.5;
-	    Scalar coef_2 = 0.5;
-	    Scalar coef_3 = 0.5;
-	
-	    Integrator_RK_Shear_kernel<<<grid,threads>>>(coef_1, d_pos,d_ori,        //input  position/orientation
-							 coef_2, pos_rk1,ori_rk1,    //input  position/orientation
-							 d_pos,d_ori,                //output position/orientation (overwritten)
-							 d_pos_gb,                   //input/output global position (updated)
-							 d_Velocity,
-							 sqm_B1,
-							 d_sqm_B1_mask,
-							 d_noise_ang,
-							 d_image,
-							 d_group_members,
-							 group_size,
-							 box,
-							 coef_3, dt,       
-							 shear_rate
-							 );
-	    
-	  }
+	// Make the displacement
+	Integrator_ExplicitEuler_Shear_kernel<<<grid,threads>>>(d_pos,     //input
+								d_ori,     //input	
+								d_pos,     //output (overwrite)
+								d_ori,     //output (overwrite)
+								d_pos_gb,  //input/output global position (updated)
+								d_Velocity,
+								sqm_B1,
+								d_sqm_B1_mask,
+								d_noise_ang,
+								d_image,
+								d_group_members,
+								group_size,
+								box,
+								dt,
+								shear_rate
+								);
 		
 	
 	// Clean up
