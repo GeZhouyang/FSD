@@ -44,7 +44,7 @@ Auxiliary functions:
 ### How to install
 
 Detailed instructions can be found in the supplemental material of Andrew's JFM [1],
-which still applies to the current version.
+which still apply to the current version.
 We are working on upgrading the codebase to the latest toolchains,
 and will update the source code when ready.
 
@@ -60,8 +60,8 @@ I would also like to thank William Torre (Utrecht) for discussions about the sol
 
 ### Reference
 
-1. Fiore & Swan (2019). [Fast Stokesian dynamics](https://doi.org/10.1017/jfm.2019.640). *Journal of Fluid Mechanics*, 878, 544-597.
-2. Elfring & Brady (2022). [Active Stokesian dynamics](https://doi.org/10.1017/jfm.2022.909). *Journal of Fluid Mechanics*, 952, A19.
-3. Ge & Elfring (2022). [Rheology of periodically sheared suspensions undergoing reversible-irreversible transition](https://doi.org/10.1103/PhysRevE.106.054616). *Journal of Fluid Mechanics*, 1003, A17.
-4. Ge & Elfring (2025). [Hydrodynamic diffusion in apolar active suspensions of squirmers](https://doi.org/10.1017/jfm.2024.1071). *Journal of Fluid Mechanics*, 1003, A17.
-5. Ge, Brady & Elfring (2025). [Nonmonotonic diffusion in sheared active suspensions of squirmers](https://apps.crossref.org/pendingpub/pendingpub.html?doi=10.1103%2F54qq-1s51). To appear in *Physical Review Letters*.
+1. Fiore & Swan (2019). [*Journal of Fluid Mechanics*, 878, 544-597.](https://doi.org/10.1017/jfm.2019.640)
+2. Elfring & Brady (2022). [*Journal of Fluid Mechanics*, 952, A19.](https://doi.org/10.1017/jfm.2022.909)
+3. Ge & Elfring (2022). [*Physical Review E*, 106, 054616 (2022)](https://doi.org/10.1103/PhysRevE.106.054616)
+4. Ge & Elfring (2025). [*Journal of Fluid Mechanics*, 1003, A17.](https://doi.org/10.1017/jfm.2024.1071)
+5. Ge, Brady & Elfring (2025). To appear in [*Physical Review Letters*.](https://doi.org/10.1103/54qq-1s51)
