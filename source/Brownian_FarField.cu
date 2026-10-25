@@ -155,12 +155,12 @@ __global__ void Brownian_FarField_RNG_Grid1of2_kernel(  	CUFFTCOMPLEX *gridX,
     //zhoge: use Gaussian random variables
     Scalar fac = sqrtf( T / dt / quadW ); //no need to times sqrt(3) for gaussian of std=1
     
-    Scalar reX = fac * d_gauss2[ idx     ];
-    Scalar reY = fac * d_gauss2[ idx + 1 ];
-    Scalar reZ = fac * d_gauss2[ idx + 2 ];
-    Scalar imX = fac * d_gauss2[ idx + 3 ];
-    Scalar imY = fac * d_gauss2[ idx + 4 ];
-    Scalar imZ = fac * d_gauss2[ idx + 5 ];
+    Scalar reX = fac * d_gauss2[ 6*idx     ];
+    Scalar reY = fac * d_gauss2[ 6*idx + 1 ];
+    Scalar reZ = fac * d_gauss2[ 6*idx + 2 ];
+    Scalar imX = fac * d_gauss2[ 6*idx + 3 ];
+    Scalar imY = fac * d_gauss2[ 6*idx + 4 ];
+    Scalar imZ = fac * d_gauss2[ 6*idx + 5 ];
 
     
     // Indices for current grid point
@@ -168,18 +168,24 @@ __global__ void Brownian_FarField_RNG_Grid1of2_kernel(  	CUFFTCOMPLEX *gridX,
     int jj = ( ( idx - kk ) / Nz ) % Ny;
     int ii = ( ( idx - kk ) / Nz - jj ) / Ny;
 		
+    // Is current grid point a nyquist point
+    bool ii_nyquist = ( ( ii == Nx/2 ) && ( Nx/2 == (Nx+1)/2 ) );
+    bool jj_nyquist = ( ( jj == Ny/2 ) && ( Ny/2 == (Ny+1)/2 ) );
+    bool kk_nyquist = ( ( kk == Nz/2 ) && ( Nz/2 == (Nz+1)/2 ) );
+
+    // Planes/lines that map onto themselves under k -> -k (index 0 or Nyquist).
+    // The Nyquist ones must be halved like the zero ones, otherwise both points of
+    // a conjugate pair are processed and the two threads race on each other's writes.
+    bool kk_self = ( kk == 0 ) || kk_nyquist;
+    bool jj_self = ( jj == 0 ) || jj_nyquist;
+
     // Only have to do the work for half the grid points (zhoge: Not exactly half, can be bigger or smaller)
     if ( 	!( 2 * kk >= Nz + 1 ) &&  // Lower half of the cube across the z-plane
-		!( ( kk == 0 ) && ( 2 * jj >= Ny + 1 ) ) && // lower half of the plane across the y-line
-		!( ( kk == 0 ) && ( jj == 0 ) && ( 2 * ii >= Nx + 1 ) ) && // lower half of the line across the x-point
+		!( kk_self && ( 2 * jj >= Ny + 1 ) ) && // lower half of the plane across the y-line
+		!( kk_self && jj_self && ( 2 * ii >= Nx + 1 ) ) && // lower half of the line across the x-point
 		!( ( kk == 0 ) && ( jj == 0 ) && ( ii == 0 ) ) // ignore origin
 		) {
 
-      // Is current grid point a nyquist point
-      bool ii_nyquist = ( ( ii == Nx/2 ) && ( Nx/2 == (Nx+1)/2 ) );
-      bool jj_nyquist = ( ( jj == Ny/2 ) && ( Ny/2 == (Ny+1)/2 ) );
-      bool kk_nyquist = ( ( kk == Nz/2 ) && ( Nz/2 == (Nz+1)/2 ) );
-			
       // Index of conjugate point
       int ii_conj, jj_conj, kk_conj;
       if ( ii == 0 || ii_nyquist ){
