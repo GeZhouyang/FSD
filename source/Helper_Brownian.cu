@@ -271,6 +271,53 @@ __global__ void Brownian_NearField_LanczosMatrixMultiply_kernel(
 
 
 /*!
+  Perform matrix-vector multiply needed for the Lanczos iteration (zhoge: near-field or far-field)
+
+  b = A * x
+
+  d_A 		(input)  matrix, numel x m
+  d_x		(input)  multiplying vector, m x 1
+  d_b		(output) result vector, A*x, numel x 1
+  group_size	(input)  number of particles
+  numel		(input)  number of elements in a vector
+  m		(input)  number of iterations ( number of columns of A, length of x )
+*/
+
+__global__ void Brownian_LanczosMatrixMultiply_kernel(
+						      Scalar *d_A,
+						      Scalar *d_x,
+						      Scalar *d_b,
+						      unsigned int group_size,
+						      int numel,
+						      int m
+						      ){
+  // Thread index
+  int idx = blockDim.x * blockIdx.x + threadIdx.x;
+       
+  // Check that thread is in bounds, and do work if so
+  if (idx < group_size) {
+
+    int stride = numel / group_size;  // stride = 6 (near-field) or 11 (far-field)
+    
+    // Initialize output to zero
+    for ( int jj = 0; jj < stride; ++jj ){
+      d_b[ stride*idx + jj ] = 0.0;
+    }
+	
+    // Do the multiplication
+    for ( int ii = 0; ii < m; ++ii ){
+		
+      Scalar xcurr = d_x[ii];
+
+      for ( int jj = 0; jj < stride; ++jj ){
+	d_b[ stride*idx + jj ] += d_A[ ii*numel + stride*idx + jj ] * xcurr;
+      }
+    }
+  }
+}
+
+
+/*!
 	Add two grid vectors
 	C = A + B
 
@@ -515,13 +562,20 @@ void Sqrt_multiply( float *d_V,       //input
   Scalar *d_Tm = work_data->bro_nf_Tm;
   cudaMemcpy( d_Tm, h_beta1, m*sizeof(Scalar), cudaMemcpyHostToDevice );
   
-  // d_y = Vm * d_Tm  (zhoge: Though prefixed by NearField, the matrix vector product applies in general.)
-  Brownian_NearField_LanczosMatrixMultiply_kernel<<<grid,threads>>>( d_V,   //input (basis vectors)
-								     d_Tm,  //input (Q * Lambda^(1/2) * Q^T * e1)
-								     d_y,   //output
-								     group_size,
-								     numel,
-								     m);
+  //// d_y = Vm * d_Tm
+  //Brownian_NearField_LanczosMatrixMultiply_kernel<<<grid,threads>>>( d_V,   //input (basis vectors)
+  //								     d_Tm,  //input (Q * Lambda^(1/2) * Q^T * e1)
+  //								     d_y,   //output
+  //								     group_size,
+  //								     numel,
+  //								     m);
+  //zhoge: should work for both near-field and far-field cases
+  Brownian_LanczosMatrixMultiply_kernel<<<grid,threads>>>( d_V,   //input (basis vectors)
+							   d_Tm,  //input (Q * Lambda^(1/2) * Q^T * e1)
+							   d_y,   //output
+							   group_size,
+							   numel,
+							   m);
 
   // Clean up
   free(Q);
